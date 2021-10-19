@@ -2,7 +2,8 @@ use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::{iter, path::PathBuf};
+use std::{iter, path::PathBuf, str::FromStr};
+use std::net::IpAddr;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct TelegramConfig {
@@ -19,6 +20,8 @@ pub struct PushoverConfig {
 pub struct Config {
     #[serde(skip)]
     path: PathBuf,
+    #[serde(default = "default_bind_ip")]
+    pub bind_ip: IpAddr,
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default = "default_database_path")]
@@ -41,6 +44,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             path: tanoshi_home().join("config.yml"),
+            bind_ip: default_bind_ip(),
             port: default_port(),
             database_path: default_database_path(),
             secret: default_secret(),
@@ -58,6 +62,13 @@ fn tanoshi_home() -> PathBuf {
     match std::env::var("TANOSHI_HOME") {
         Ok(path) => PathBuf::from(path),
         Err(_) => dirs::home_dir().expect("should have home").join(".tanoshi"),
+    }
+}
+
+fn default_bind_ip() -> IpAddr {
+    match IpAddr::from_str("0.0.0.0") { // Replace with '::0' to bind to IPv6
+      Ok(v) => v,
+      Err(_) => panic!(),
     }
 }
 

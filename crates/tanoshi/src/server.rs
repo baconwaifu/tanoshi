@@ -27,8 +27,7 @@ use axum::{
 use axum::{AddExtensionLayer, Router, Server};
 use headers::{authorization::Bearer, Authorization};
 use std::{
-    net::{IpAddr, SocketAddr},
-    str::FromStr,
+    net::{SocketAddr},
 };
 use tokio::sync::mpsc::Sender;
 
@@ -129,7 +128,7 @@ pub async fn serve<T>(
 ) -> Result<(), anyhow::Error> {
     let app = init_app(userdb, mangadb, config, extension_bus, worker_tx);
 
-    let addr = SocketAddr::from((IpAddr::from_str("0.0.0.0")?, config.port));
+    let addr = SocketAddr::from((config.bind_ip, config.port));
     Server::bind(&addr).serve(app.into_make_service()).await?;
 
     Ok(())
