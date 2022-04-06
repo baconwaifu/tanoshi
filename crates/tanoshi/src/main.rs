@@ -154,7 +154,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let proxy = Proxy::new(config.secret.clone());
 
     let app = server::init_app(config.enable_playground, schema, proxy);
-    let server_fut = server::serve("0.0.0.0", config.port, app);
+    let server_fut = server::serve(&config.addr, config.port, app);
 
     tokio::select! {
         _ = server_fut => {

@@ -45,6 +45,8 @@ pub struct Config {
     pub extension_repository: String,
     #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default = "default_addr")]
+    pub addr: String,
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default = "default_database_path")]
@@ -74,6 +76,7 @@ impl Default for Config {
             path: tanoshi_home().join("config.yml"),
             extension_repository: default_extension_repository(),
             base_url: None,
+            addr: default_addr(),
             port: default_port(),
             database_path: default_database_path(),
             secret: default_secret(),
@@ -95,6 +98,10 @@ fn tanoshi_home() -> PathBuf {
         Ok(path) => PathBuf::from(path),
         Err(_) => dirs::home_dir().expect("should have home").join(".tanoshi"),
     }
+}
+
+fn default_addr() -> String {
+    "::0".to_string()
 }
 
 fn default_port() -> u16 {
