@@ -1,42 +1,34 @@
 extern crate log;
 
-mod data;
-mod generate;
-mod test;
+use std::path::PathBuf;
 
-use clap::{AppSettings, Clap};
-use tanoshi_vm::{bus::ExtensionBus, vm};
+use clap::{Parser, Subcommand};
+use serde::Serialize;
+use tanoshi_lib::prelude::SourceInfo;
+use tanoshi_vm::{prelude::SourceBus, PLUGIN_EXTENSION};
 
-#[derive(Clap)]
-#[clap(version = "0.1.1", author = "Muhammad Fadhlika <fadhlika@gmail.com>")]
-#[clap(setting = AppSettings::ColoredHelp)]
+const TARGET: &str = env!("TARGET");
+
+#[derive(Parser)]
+#[clap(version = "0.1.1")]
 struct Opts {
-    #[clap(short, long, default_value = "target/wasm32-wasi/release")]
+    #[clap(short, long, default_value = "./")]
     path: String,
     #[clap(subcommand)]
-    subcmd: SubCommand,
+    subcmd: Command,
 }
 
-#[derive(Clap)]
-enum SubCommand {
-    #[cfg(not(feature = "disable-compiler"))]
-    Compile(CompileOption),
+#[derive(Subcommand)]
+enum Command {
     GenerateJson,
-    Test(TestOption),
 }
 
-#[derive(Clap)]
-struct TestOption {
-    #[clap(long)]
-    selector: Option<String>,
-}
-
-#[derive(Clap)]
-struct CompileOption {
-    #[clap(long)]
-    target: String,
-    #[clap(long)]
-    remove_wasm: bool,
+#[derive(Debug, Serialize)]
+struct SourceIndex {
+    #[serde(flatten)]
+    source: SourceInfo,
+    rustc_version: String,
+    lib_version: String,
 }
 
 #[tokio::main]
@@ -45,35 +37,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let opts: Opts = Opts::parse();
 
-    let (_, extension_tx) = vm::start();
-
-    #[cfg(not(feature = "disable-compiler"))]
-    if !matches!(opts.subcmd, SubCommand::Compile(_)) {
-        vm::load(&opts.path, extension_tx.clone()).await?;
-    }
-
-    #[cfg(feature = "disable-compiler")]
-    vm::load(&opts.path, extension_tx.clone()).await?;
-
-    let extension_bus = ExtensionBus::new(opts.path.clone(), extension_tx);
-
     match opts.subcmd {
-        #[cfg(not(feature = "disable-compiler"))]
-        SubCommand::Compile(compile_opts) => {
-            // let triples = [
-            //     "x86_64-apple-darwin",
-            //     "x86_64-pc-windows-msvc",
-            //     "x86_64-unknown-linux-gnu",
-            //     "aarch64-unknown-linux-gnu",
-            // ];
-            vm::compile_with_target(&opts.path, &compile_opts.target, compile_opts.remove_wasm)
-                .await?;
-        }
-        SubCommand::GenerateJson => {
-            generate::generate_json(extension_bus).await?;
-        }
-        SubCommand::Test(config) => {
-            test::test(extension_bus, config.selector).await?;
+        Command::GenerateJson => {
+            let target_dir_path = PathBuf::new().join("output").join(TARGET);
+            tokio::fs::create_dir_all(&target_dir_path).await?;
+
+            let mut read_dir = tokio::fs::read_dir(&opts.path).await?;
+            while let Some(entry) = read_dir.next_entry().await? {
+                let mut name = format!("{:?}", entry.file_name());
+                name.remove(0);
+                name.remove(name.len() - 1);
+
+                if name.ends_with(PLUGIN_EXTENSION) {
+                    #[cfg(target_os = "linux")]
+                    let name = name.replace("lib", "");
+
+                    tokio::fs::copy(entry.path(), &target_dir_path.join(name).as_path()).await?;
+                }
+            }
+
+            let extension_manager = SourceBus::new(&target_dir_path);
+            extension_manager.load_all().await?;
+            let source_list = extension_manager.list().await?;
+
+            let mut indexes = vec![];
+            for source in source_list {
+                let (rustc_version, lib_version) = extension_manager.get_version(source.id)?;
+                indexes.push(SourceIndex {
+                    source,
+                    rustc_version,
+                    lib_version,
+                })
+            }
+
+            let json = serde_json::to_string(&indexes)?;
+            tokio::fs::write(target_dir_path.join("index").with_extension("json"), json).await?;
         }
     }
 

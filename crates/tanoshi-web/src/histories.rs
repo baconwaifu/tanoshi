@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::common::snackbar;
 use crate::query;
-use crate::utils::{proxied_image_url, AsyncLoader};
+use crate::utils::{is_tauri_signal, proxied_image_url, AsyncLoader};
 use crate::{
     app::App,
     common::{Route, Spinner},
@@ -72,6 +72,7 @@ impl Histories {
     pub fn render_topbar() -> Dom {
         html!("div", {
             .class("topbar")
+            .class_signal("tauri", is_tauri_signal())
             .children(&mut [
                 html!("div", {
                 }),
@@ -86,6 +87,7 @@ impl Histories {
 
     pub fn render_main(histories: Rc<Self>) -> Dom {
         html!("ul", {
+            .class("content")
             .class("list")
             .children_signal_vec(histories.entries.signal_vec_cloned().map(|entry| html!("li", {
                 .class("list-item")
@@ -121,8 +123,7 @@ impl Histories {
                         ])
                     }),
                     html!("button", {
-                        .style("margin-left", "0.5rem")
-                        .style("margin-right", "0.5rem")
+                        .style("padding", "0.5rem")
                         .event(clone!(entry => move |_:events::Click| {
                             routing::go_to_url(Route::Manga(entry.manga_id).url().as_str());
                         }))
@@ -130,6 +131,8 @@ impl Histories {
                             svg!("svg", {
                                 .attribute("xmlns", "http://www.w3.org/2000/svg")
                                 .attribute("fill", "none")
+                                .attribute("width", "24px")
+                                .attribute("height", "24px")
                                 .attribute("viewBox", "0 0 24 24")
                                 .attribute("stroke", "currentColor")
                                 .class("icon")
@@ -138,7 +141,7 @@ impl Histories {
                                         .attribute("stroke-linecap", "round")
                                         .attribute("stroke-linejoin", "round")
                                         .attribute("stroke-width", "2")
-                                        .attribute("d", "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253")
+                                        .attribute("d", "M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z")
                                     })
                                 ])
                             }),
@@ -172,6 +175,7 @@ impl Histories {
     pub fn render(histories: Rc<Self>, _app: Rc<App>) -> Dom {
         Self::fetch_read_histories(histories.clone());
         html!("div", {
+            .class("main")
             .children(&mut [
                 Self::render_topbar(),
                 html!("div", {

@@ -1,10 +1,15 @@
 use std::rc::Rc;
 
-use crate::{common::events, utils::local_storage};
+use crate::{
+    catalogue_list,
+    common::events,
+    utils::{is_tauri_signal, local_storage},
+};
 
 use super::{Route, SettingCategory};
-use dominator::{html, link, routing, svg, Dom};
+use dominator::{html, link, svg, Dom};
 use futures_signals::signal::SignalExt;
+use wasm_bindgen::UnwrapThrowExt;
 
 pub struct Bottombar {}
 
@@ -17,10 +22,10 @@ impl Bottombar {
     pub fn render() -> Dom {
         html!("div", {
             .class("bottombar")
+            .class_signal("tauri", is_tauri_signal())
             .children(&mut [
-                link!(Route::Library.url(), {
-                    // .class(LINK_CLASS)
-                    .class_signal("active", Route::signal().map(|x| matches!(x, Route::Library)))
+                link!(Route::Root.url(), {
+                    .class_signal("active", Route::signal().map(|x| matches!(x, Route::LibraryList | Route::Library(_))))
                     .children(&mut [
                         svg!("svg", {
                             .attribute("xmlns", "http://www.w3.org/2000/svg")
@@ -33,7 +38,7 @@ impl Bottombar {
                                     .attribute("stroke-linejoin", "round")
                                     .attribute("stroke-width", "1")
                                     .class("heroicon-ui")
-                                    .attribute("d", "M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z")
+                                    .attribute("d", "M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z")
                                 })
                             ])
                         }),
@@ -42,12 +47,10 @@ impl Bottombar {
                         })
                     ])
                 }),
-                html!("button", {
-                    // .class(LINK_CLASS)
-                    .class_signal("active", Route::signal().map(|x| matches!(x, Route::Catalogue{id: _, latest: _})))
-                    .event_preventable(|_:events::Click| {
-                        local_storage().delete("catalogue").unwrap();
-                        routing::go_to_url(Route::Catalogue{id: 0, latest: false}.url().as_str());
+                link!(Route::CatalogueList.url(), {
+                    .class_signal("active", Route::signal().map(|x| matches!(x, Route::CatalogueList)))
+                    .event(|_:events::Click| {
+                        local_storage().delete(catalogue_list::STORAGE_KEY).unwrap_throw();
                     })
                     .children(&mut [
                         svg!("svg", {
@@ -71,7 +74,6 @@ impl Bottombar {
                     ])
                 }),
                 link!(Route::Updates.url(), {
-                    // .class(LINK_CLASS)
                     .class_signal("active", Route::signal().map(|x| matches!(x, Route::Updates)))
                     .children(&mut [
                         svg!("svg", {
@@ -95,7 +97,6 @@ impl Bottombar {
                     ])
                 }),
                 link!(Route::Histories.url(), {
-                    // .class(LINK_CLASS)
                     .class_signal("active", Route::signal().map(|x| matches!(x, Route::Histories)))
                     .children(&mut [
                         svg!("svg", {
@@ -119,7 +120,6 @@ impl Bottombar {
                     ])
                 }),
                 link!(Route::Settings(SettingCategory::None).url(), {
-                    // .class(LINK_CLASS)
                     .class_signal("active", Route::signal().map(|x| matches!(x, Route::Settings(_))))
                     .children(&mut [
                         svg!("svg", {
@@ -133,19 +133,12 @@ impl Bottombar {
                                     .attribute("stroke-linejoin", "round")
                                     .attribute("stroke-width", "1")
                                     .class("heroicon-ui")
-                                    .attribute("d", "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z")
+                                    .attribute("d", "M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 11-2 0 1 1 0 012 0zm7 0a1 1 0 11-2 0 1 1 0 012 0zm7 0a1 1 0 11-2 0 1 1 0 012 0z")
                                 }),
-                                svg!("path", {
-                                    .attribute("stroke-linecap", "round")
-                                    .attribute("stroke-linejoin", "round")
-                                    .attribute("stroke-width", "1")
-                                    .class("heroicon-ui")
-                                    .attribute("d", "M15 12a3 3 0 11-6 0 3 3 0 016 0z")
-                                })
                             ])
                         }),
                         html!("span", {
-                            .text("Settings")
+                            .text("More")
                         })
                     ])
                 }),

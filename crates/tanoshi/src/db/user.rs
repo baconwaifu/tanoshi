@@ -1,4 +1,4 @@
-use super::model::User;
+use super::model::{Token, User};
 use anyhow::{anyhow, Result};
 use sqlx::{
     sqlite::{SqliteArguments, SqlitePool},
@@ -185,5 +185,81 @@ impl Db {
             .rows_affected();
 
         Ok(rows_affected)
+    }
+
+    pub async fn insert_tracker_credential(
+        &self,
+        user_id: i64,
+        tracker: &str,
+        token: Token,
+    ) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(
+            r#"INSERT INTO tracker_credential(
+                user_id,
+                tracker,
+                token_type,
+                expires_in,
+                access_token,
+                refresh_token
+            ) VALUES (?, ?, ?, ?, ?, ?) 
+            ON CONFLICT(user_id, tracker) DO UPDATE SET 
+            token_type = excluded.token_type,
+            expires_in = excluded.expires_in,
+            access_token = excluded.access_token,
+            refresh_token = excluded.refresh_token"#,
+        )
+        .bind(user_id)
+        .bind(tracker)
+        .bind(token.token_type)
+        .bind(token.expires_in)
+        .bind(token.access_token)
+        .bind(token.refresh_token)
+        .execute(&mut conn)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_user_tracker_token(&self, tracker: &str, user_id: i64) -> Result<Token> {
+        let mut conn = self.pool.acquire().await?;
+        let row = sqlx::query(
+            r#"SELECT token_type, access_token, refresh_token, expires_in FROM tracker_credential WHERE user_id = ? AND tracker = ?"#,
+        )
+        .bind(user_id)
+        .bind(tracker)
+        .fetch_one(&mut conn)
+        .await;
+
+        Ok(row.map(|row| Token {
+            token_type: row.get(0),
+            access_token: row.get(1),
+            refresh_token: row.get(2),
+            expires_in: row.get(3),
+        })?)
+    }
+
+    pub async fn user_tracker_login_status(&self, tracker: &str, user_id: i64) -> Result<bool> {
+        let mut conn = self.pool.acquire().await?;
+        let row = sqlx::query(
+            r#"SELECT COUNT(1) FROM tracker_credential WHERE user_id = ? AND tracker = ?"#,
+        )
+        .bind(user_id)
+        .bind(tracker)
+        .fetch_one(&mut conn)
+        .await?;
+
+        Ok(row.get::<i64, _>(0) > 0)
+    }
+
+    pub async fn delete_user_tracker_login(&self, tracker: &str, user_id: i64) -> Result<u64> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("DELETE FROM tracker_credential WHERE user_id = ? AND tracker = ?")
+            .bind(user_id)
+            .bind(tracker)
+            .execute(&mut conn)
+            .await
+            .map(|res| res.rows_affected())
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }

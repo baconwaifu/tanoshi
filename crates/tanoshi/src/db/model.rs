@@ -40,10 +40,9 @@ pub struct Chapter {
     pub path: String,
     pub number: f64,
     pub scanlator: String,
-    pub prev: Option<i64>,
-    pub next: Option<i64>,
     pub uploaded: NaiveDateTime,
     pub date_added: NaiveDateTime,
+    pub downloaded_path: Option<String>,
 }
 
 impl Default for Chapter {
@@ -56,10 +55,9 @@ impl Default for Chapter {
             path: "".to_string(),
             number: 0_f64,
             scanlator: "".to_string(),
-            prev: None,
-            next: None,
             uploaded: NaiveDateTime::from_timestamp(0, 0),
             date_added: NaiveDateTime::from_timestamp(0, 0),
+            downloaded_path: None,
         }
     }
 }
@@ -102,4 +100,61 @@ pub struct ReadProgress {
 pub struct UserMangaLibrary {
     pub user_ids: Vec<i64>,
     pub manga: Manga,
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadQueue {
+    pub id: i64,
+    pub source_id: i64,
+    pub source_name: String,
+    pub manga_id: i64,
+    pub manga_title: String,
+    pub chapter_id: i64,
+    pub chapter_title: String,
+    pub rank: i64,
+    pub url: String,
+    pub priority: i64,
+    pub date_added: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadQueueEntry {
+    pub source_id: i64,
+    pub source_name: String,
+    pub manga_id: i64,
+    pub manga_title: String,
+    pub chapter_id: i64,
+    pub chapter_title: String,
+    pub downloaded: i64,
+    pub total: i64,
+    pub priority: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Category {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackingOauthSession {
+    pub id: i64,
+    pub user_id: i64,
+    pub csrf_state: String,
+    pub pkce_code_verifier: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub token_type: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackedManga {
+    pub manga_id: i64,
+    pub tracker: String,
+    pub tracker_manga_id: Option<String>,
 }

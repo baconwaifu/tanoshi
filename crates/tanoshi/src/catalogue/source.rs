@@ -1,69 +1,36 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    str::FromStr,
-};
+use std::{collections::HashMap, str::FromStr};
 
-use crate::user;
-use async_graphql::{Context, Json, Object, Result, SimpleObject};
-use serde::{Deserialize, Serialize};
-use tanoshi_lib::prelude::{FilterField, Version};
-use tanoshi_vm::prelude::ExtensionBus;
+use crate::{config::GLOBAL_CONFIG, guard::AdminGuard, user::Claims};
+use async_graphql::{Context, Object, Result};
+use serde::Deserialize;
+use tanoshi_lib::prelude::Version;
+use tanoshi_vm::extension::SourceBus;
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SourceIndex {
-    pub id: i64,
-    pub name: String,
-    pub path: String,
-    pub version: String,
-    pub icon: String,
-}
+use super::InputList;
 
-impl From<SourceIndex> for Source {
-    fn from(index: SourceIndex) -> Self {
-        Self {
-            id: index.id,
-            name: index.name,
-            version: index.version,
-            icon: index.icon,
-            need_login: false,
-            has_update: false,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, SimpleObject)]
-pub struct Filters {
-    default: String,
-    fields: Json<BTreeMap<String, FilterField>>,
-}
-
-impl From<tanoshi_lib::data::Filters> for Filters {
-    fn from(v: tanoshi_lib::data::Filters) -> Self {
-        Self {
-            default: v.default,
-            fields: Json(v.fields),
-        }
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Deserialize)]
 pub struct Source {
     pub id: i64,
     pub name: String,
+    pub url: String,
     pub version: String,
+    pub rustc_version: String,
+    pub lib_version: String,
     pub icon: String,
-    pub need_login: bool,
+    #[serde(default)]
     pub has_update: bool,
 }
 
-impl From<tanoshi_lib::data::Source> for Source {
-    fn from(s: tanoshi_lib::data::Source) -> Self {
+impl From<tanoshi_lib::models::SourceInfo> for Source {
+    fn from(s: tanoshi_lib::models::SourceInfo) -> Self {
         Self {
             id: s.id,
-            name: s.name,
+            name: s.name.to_string(),
+            url: s.url.to_string(),
             version: s.version.to_string(),
-            icon: s.icon,
-            need_login: s.need_login,
+            rustc_version: "".to_string(),
+            lib_version: "".to_string(),
+            icon: s.icon.to_string(),
             has_update: false,
         }
     }
@@ -74,29 +41,37 @@ impl Source {
     async fn id(&self) -> i64 {
         self.id
     }
+
     async fn name(&self) -> String {
         self.name.clone()
     }
+
+    async fn url(&self) -> String {
+        self.url.clone()
+    }
+
     async fn version(&self) -> String {
         self.version.clone()
     }
+
     async fn icon(&self) -> String {
         self.icon.clone()
     }
-    async fn need_login(&self) -> bool {
-        self.need_login
-    }
+
     async fn has_update(&self) -> bool {
         self.has_update
     }
 
-    async fn filters(&self, ctx: &Context<'_>) -> Result<Option<Filters>> {
-        let extensions = ctx.data::<ExtensionBus>()?;
-        if let Some(res) = extensions.filters(self.id).await? {
-            Ok(Some(res.into()))
-        } else {
-            Ok(None)
-        }
+    async fn filters(&self, ctx: &Context<'_>) -> Result<InputList> {
+        let filters = ctx.data::<SourceBus>()?.filter_list(self.id)?;
+
+        Ok(InputList(filters))
+    }
+
+    async fn preferences(&self, ctx: &Context<'_>) -> Result<InputList> {
+        let preferences = ctx.data::<SourceBus>()?.get_preferences(self.id)?;
+
+        Ok(InputList(preferences))
     }
 }
 
@@ -110,12 +85,16 @@ impl SourceRoot {
         ctx: &Context<'_>,
         check_update: bool,
     ) -> Result<Vec<Source>> {
-        let installed_sources = ctx.data::<ExtensionBus>()?.list().await?;
+        let _ = ctx.data::<Claims>()?;
+        let installed_sources = ctx.data::<SourceBus>()?.list().await?;
         let mut sources: Vec<Source> = vec![];
         if check_update {
             let available_sources_map = {
-                let url = "https://faldez.github.io/tanoshi-extensions".to_string();
-                let available_sources: Vec<SourceIndex> = reqwest::get(&url).await?.json().await?;
+                let url = GLOBAL_CONFIG
+                    .get()
+                    .map(|cfg| format!("{}/index.json", cfg.extension_repository))
+                    .ok_or("no config set")?;
+                let available_sources: Vec<Source> = reqwest::get(&url).await?.json().await?;
                 let mut available_sources_map = HashMap::new();
                 for source in available_sources {
                     available_sources_map.insert(source.id, source);
@@ -140,22 +119,27 @@ impl SourceRoot {
     }
 
     async fn available_sources(&self, ctx: &Context<'_>) -> Result<Vec<Source>> {
-        let url = "https://faldez.github.io/tanoshi-extensions".to_string();
-        let source_indexes: Vec<SourceIndex> = reqwest::get(&url).await?.json().await?;
-        let extensions = ctx.data::<ExtensionBus>()?;
+        let _ = ctx.data::<Claims>()?;
+        let url = GLOBAL_CONFIG
+            .get()
+            .map(|cfg| format!("{}/index.json", cfg.extension_repository))
+            .ok_or("no config set")?;
+        let source_indexes: Vec<Source> = reqwest::get(&url).await?.json().await?;
+        let extensions = ctx.data::<SourceBus>()?;
 
         let mut sources: Vec<Source> = vec![];
         for index in source_indexes {
-            if !extensions.exist(index.id).await? {
-                sources.push(index.into());
+            if !extensions.exists(index.id).await? {
+                sources.push(index);
             }
         }
         Ok(sources)
     }
 
     async fn source(&self, ctx: &Context<'_>, source_id: i64) -> Result<Source> {
-        let exts = ctx.data::<ExtensionBus>()?;
-        Ok(exts.detail(source_id).await?.into())
+        let _ = ctx.data::<Claims>()?;
+        let source = ctx.data::<SourceBus>()?.get_source_info(source_id)?;
+        Ok(source.into())
     }
 }
 
@@ -164,79 +148,89 @@ pub struct SourceMutationRoot;
 
 #[Object]
 impl SourceMutationRoot {
+    #[graphql(guard = "AdminGuard::new()")]
     async fn install_source(&self, ctx: &Context<'_>, source_id: i64) -> Result<i64> {
-        if !user::check_is_admin(ctx)? {
-            return Err("Forbidden".into());
-        }
-
-        let extensions = ctx.data::<ExtensionBus>()?;
-        if extensions.exist(source_id).await? {
+        if ctx.data::<SourceBus>()?.exists(source_id).await? {
             return Err("source installed, use updateSource to update".into());
         }
-
-        let url = "https://faldez.github.io/tanoshi-extensions".to_string();
-        let source_indexes: Vec<SourceIndex> = reqwest::get(&url).await?.json().await?;
-        let source: SourceIndex = source_indexes
+        let url = GLOBAL_CONFIG
+            .get()
+            .map(|cfg| cfg.extension_repository.clone())
+            .ok_or("no config set")?;
+        let source_indexes: Vec<Source> = reqwest::get(format!("{}/index.json", url))
+            .await?
+            .json()
+            .await?;
+        let source: Source = source_indexes
             .iter()
             .find(|index| index.id == source_id)
             .ok_or("source not found")?
             .clone();
 
-        let url = format!(
-            "https://faldez.github.io/tanoshi-extensions/library/{}.{}.tanoshi",
-            source.name,
-            env!("TARGET")
-        );
+        if source.rustc_version != tanoshi_lib::RUSTC_VERSION
+            || source.lib_version != tanoshi_lib::LIB_VERSION
+        {
+            return Err("Incompatible version, update tanoshi server".into());
+        }
 
-        let raw = reqwest::get(&url).await?.bytes().await?;
-        extensions.install(source.name, &raw).await?;
+        ctx.data::<SourceBus>()?.install(&url, &source.name).await?;
 
         Ok(source.id)
     }
 
+    #[graphql(guard = "AdminGuard::new()")]
     async fn uninstall_source(&self, ctx: &Context<'_>, source_id: i64) -> Result<i64> {
-        if !user::check_is_admin(ctx)? {
-            return Err("Forbidden".into());
-        }
-
-        let extensions = ctx.data::<ExtensionBus>()?;
-
-        extensions.unload(source_id).await?;
+        ctx.data::<SourceBus>()?.remove(source_id).await?;
 
         Ok(source_id)
     }
 
+    #[graphql(guard = "AdminGuard::new()")]
     async fn update_source(&self, ctx: &Context<'_>, source_id: i64) -> Result<i64> {
-        if !user::check_is_admin(ctx)? {
-            return Err("Forbidden".into());
-        }
+        let extensions = ctx.data::<SourceBus>()?;
+        let installed_source = extensions.get_source_info(source_id)?;
 
-        let extensions = ctx.data::<ExtensionBus>()?;
-        extensions.exist(source_id).await?;
+        let url = GLOBAL_CONFIG
+            .get()
+            .map(|cfg| cfg.extension_repository.clone())
+            .ok_or("no config set")?;
 
-        let url = "https://faldez.github.io/tanoshi-extensions".to_string();
-
-        let source_indexes: Vec<SourceIndex> = reqwest::get(&url).await?.json().await?;
-        let source: SourceIndex = source_indexes
+        let source_indexes: Vec<Source> = reqwest::get(format!("{}/index.json", url))
+            .await?
+            .json()
+            .await?;
+        let source: Source = source_indexes
             .iter()
             .find(|index| index.id == source_id)
             .ok_or("source not found")?
             .clone();
 
-        if extensions.detail(source_id).await?.version == Version::from_str(&source.version)? {
+        if Version::from_str(installed_source.version)? == Version::from_str(&source.version)? {
             return Err("No new version".into());
         }
 
-        let url = format!(
-            "https://faldez.github.io/tanoshi-extensions/library/{}.{}.tanoshi",
-            source.name,
-            env!("TARGET")
-        );
+        if source.rustc_version != tanoshi_lib::RUSTC_VERSION
+            || source.lib_version != tanoshi_lib::LIB_VERSION
+        {
+            return Err("Incompatible version, update tanoshi server".into());
+        }
 
-        let raw = reqwest::get(&url).await?.bytes().await?;
+        extensions.remove(source_id).await?;
+        extensions.install(&url, &source.name).await?;
 
-        extensions.unload(source_id).await?;
-        extensions.install(source.name, &raw).await?;
+        Ok(source_id)
+    }
+
+    #[graphql(guard = "AdminGuard::new()")]
+    async fn set_preferences(
+        &self,
+        ctx: &Context<'_>,
+        source_id: i64,
+        preferences: InputList,
+    ) -> Result<i64> {
+        ctx.data::<SourceBus>()?
+            .set_preferences(source_id, preferences.0)
+            .await?;
 
         Ok(source_id)
     }

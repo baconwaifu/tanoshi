@@ -1,14 +1,13 @@
 use std::iter;
 
-use aes::Aes128;
-use block_modes::block_padding::Pkcs7;
-use block_modes::{BlockMode, Cbc};
+use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use rand::distributions::Alphanumeric;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 
 // create an alias for convenience
-type Aes128Cbc = Cbc<Aes128, Pkcs7>;
+type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
 #[allow(dead_code)]
 fn generate_iv() -> String {
@@ -20,67 +19,53 @@ fn generate_iv() -> String {
     String::from_utf8(chars).unwrap()
 }
 
-pub fn encrypt_url(key: &str, url: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub fn encrypt_url(key: &str, url: &str) -> Result<String, anyhow::Error> {
     let pos = url.len();
     let mut buffer = vec![0_u8; pos * 2];
     buffer.splice(..pos, url.as_bytes().to_vec());
 
     let iv = [0_u8; 16];
-    let chiper = Aes128Cbc::new_from_slices(key.as_bytes(), &iv)?;
-    let chipertext = chiper.encrypt(&mut buffer, pos)?;
+    let chipertext = Aes128CbcEnc::new(key.as_bytes().into(), &iv.into())
+        .encrypt_padded_mut::<Pkcs7>(&mut buffer, pos)
+        .map_err(|e| anyhow::anyhow!("error encrypt url {e}"))?;
 
     let encoded = base64::encode_config(chipertext, base64::URL_SAFE_NO_PAD);
 
     Ok(encoded)
 }
 
-pub fn decrypt_url(key: &str, data: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub fn decrypt_url(key: &str, data: &str) -> Result<String, anyhow::Error> {
     let mut decoded = base64::decode_config(data, base64::URL_SAFE_NO_PAD)?;
-    debug!("decoded: {:?}", decoded);
+    trace!("decoded: {:?}", decoded);
 
     let iv = [0_u8; 16];
 
-    let chiper = Aes128Cbc::new_from_slices(key.as_bytes(), &iv)?;
-    let bytes = chiper.decrypt(&mut decoded)?.to_vec();
+    let bytes = Aes128CbcDec::new(key.as_bytes().into(), &iv.into())
+        .decrypt_padded_mut::<Pkcs7>(&mut decoded)
+        .map_err(|e| anyhow::anyhow!("error decrypt url {e}"))?
+        .to_vec();
 
     let url = String::from_utf8(bytes)?;
     Ok(url)
 }
 
-/*
-use jsonwebtoken::{self, DecodingKey, EncodingKey, Header, Validation};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    pub url: String,
-    pub exp: i64,
+pub fn decode_cursor(cursor: &str) -> std::result::Result<(i64, i64), base64::DecodeError> {
+    match base64::decode(cursor) {
+        Ok(res) => {
+            let cursor = String::from_utf8(res).unwrap();
+            let decoded = cursor
+                .split('#')
+                .map(|s| s.parse::<i64>().unwrap())
+                .collect::<Vec<i64>>();
+            Ok((decoded[0], decoded[1]))
+        }
+        Err(err) => Err(err),
+    }
 }
 
-pub fn sign_url(secret: &str, url: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let token = jsonwebtoken::encode(
-        &Header::default(),
-        &Claims {
-            url: url.to_string(),
-            exp: 3600,
-        },
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )?;
-
-    Ok(token)
+pub fn encode_cursor(timestamp: i64, id: i64) -> String {
+    base64::encode(format!("{}#{}", timestamp, id))
 }
-
-pub fn validate_url(secret: &str, data: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let token = jsonwebtoken::decode::<Claims>(
-        data,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    )?;
-
-    Ok(token.claims.url)
-}
-
-*/
 
 #[cfg(test)]
 mod test {

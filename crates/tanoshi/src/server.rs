@@ -1,35 +1,20 @@
-use crate::{
-    config::Config,
-    db::{MangaDatabase, UserDatabase},
-    proxy::Proxy,
-    schema::{MutationRoot, QueryRoot, TanoshiSchema},
-    user::Secret,
-    worker::Command as WorkerCommand,
-};
-use tanoshi_vm::bus::ExtensionBus;
+use crate::{config::GLOBAL_CONFIG, proxy::Proxy, schema::TanoshiSchema, user::Claims};
 
-use async_graphql::{
-    // extensions::ApolloTracing,
-    http::{playground_source, GraphQLPlaygroundConfig},
-    EmptySubscription,
-    Schema,
-};
+use async_graphql::http::{playground_source, GraphQLPlaygroundConfig};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::{async_trait, handler::get};
 use axum::{
+    async_trait,
     extract::{Extension, FromRequest, RequestParts, TypedHeader},
-    routing::BoxRoute,
-};
-use axum::{
-    handler::post,
     response::{self, IntoResponse},
+    routing::{get, post},
+    Router, Server,
 };
-use axum::{AddExtensionLayer, Router, Server};
 use headers::{authorization::Bearer, Authorization};
+use jsonwebtoken::{DecodingKey, Validation};
 use std::{
     net::{SocketAddr},
 };
-use tokio::sync::mpsc::Sender;
+use tower_http::cors::{Any, CorsLayer};
 
 struct Token(String);
 
@@ -56,8 +41,20 @@ async fn graphql_handler(
     schema: Extension<TanoshiSchema>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    let req = req.into_inner();
-    let req = req.data(token.0);
+    let mut req = req.into_inner();
+
+    let secret = GLOBAL_CONFIG
+        .get()
+        .map(|cfg| cfg.secret.to_owned())
+        .unwrap_or_else(|| "".to_string());
+    if let Ok(claims) = jsonwebtoken::decode::<Claims>(
+        &token.0,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    ) {
+        req = req.data(claims.claims);
+    }
+
     schema.execute(req).await.into()
 }
 
@@ -70,66 +67,53 @@ async fn health_check() -> impl IntoResponse {
     response::Html("OK")
 }
 
-fn init_app(
-    userdb: UserDatabase,
-    mangadb: MangaDatabase,
-    config: &Config,
-    extension_bus: ExtensionBus,
-    worker_tx: Sender<WorkerCommand>,
-) -> Router<BoxRoute> {
-    let schema: TanoshiSchema = Schema::build(
-        QueryRoot::default(),
-        MutationRoot::default(),
-        EmptySubscription::default(),
-    )
-    // .extension(ApolloTracing)
-    .data(userdb)
-    .data(mangadb)
-    .data(Secret(config.secret.clone()))
-    .data(extension_bus)
-    .data(worker_tx)
-    .finish();
+pub fn init_app(
+    enable_playground: bool,
+    schema: TanoshiSchema,
+    proxy: Proxy,
+) -> Router<axum::body::Body> {
+    let mut app = Router::new();
 
-    let proxy = Proxy::new(config.secret.clone());
+    app = app
+        .route("/health", get(health_check))
+        .route("/image/:url", get(Proxy::proxy))
+        .layer(Extension(proxy));
 
-    let mut app = Router::new().boxed();
+    if enable_playground {
+        app = app
+            .route("/graphql", get(graphql_playground).post(graphql_handler))
+            .route("/graphql/", post(graphql_handler));
+    } else {
+        app = app
+            .route("/graphql", post(graphql_handler))
+            .route("/graphql/", post(graphql_handler));
+    }
+
+    app = app.layer(Extension(schema)).layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+            .allow_credentials(true),
+    );
 
     #[cfg(feature = "embed")]
     {
-        app = app.nest("/", get(crate::assets::static_handler)).boxed();
-    }
-
-    app = app
-        .route("/image/:url", get(Proxy::proxy))
-        .route("/health", get(health_check))
-        .layer(AddExtensionLayer::new(proxy))
-        .boxed();
-    if config.enable_playground {
-        app = app
-            .nest("/graphql", get(graphql_playground).post(graphql_handler))
-            .layer(AddExtensionLayer::new(schema))
-            .boxed();
-    } else {
-        app = app
-            .nest("/graphql", post(graphql_handler))
-            .layer(AddExtensionLayer::new(schema))
-            .boxed();
+        app = app.fallback(get(crate::assets::static_handler));
     }
 
     app
 }
 
-pub async fn serve<T>(
-    userdb: UserDatabase,
-    mangadb: MangaDatabase,
-    config: &Config,
-    extension_bus: ExtensionBus,
-    worker_tx: Sender<WorkerCommand>,
+pub async fn serve(
+    addr: &str,
+    port: u16,
+    router: Router<axum::body::Body>,
 ) -> Result<(), anyhow::Error> {
-    let app = init_app(userdb, mangadb, config, extension_bus, worker_tx);
-
     let addr = SocketAddr::from((config.bind_ip, config.port));
-    Server::bind(&addr).serve(app.into_make_service()).await?;
+    Server::bind(&addr)
+        .serve(router.into_make_service())
+        .await?;
 
     Ok(())
 }

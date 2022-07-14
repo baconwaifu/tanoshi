@@ -3,8 +3,11 @@ schema {
   mutation: MutationRoot
 }
 
-# Directs the executor to query only when the field exists.
-directive @ifdef on FIELD
+type Category {
+  id: Int
+  name: String!
+  count: Int!
+}
 
 type Chapter {
   id: Int!
@@ -17,20 +20,48 @@ type Chapter {
   readProgress: ReadProgress
   uploaded: NaiveDateTime!
   dateAdded: NaiveDateTime!
+  source: Source!
   manga: Manga!
   pages(
     # fetch from source
     fetch: Boolean! = false
+
+    # encrypt url
+    encrypt: Boolean! = true
   ): [String!]!
+  downloadedPath: String
 }
 
-type Filters {
-  default: String!
-  fields: JSON!
+type ChapterConnection {
+  # Information to aid in pagination.
+  pageInfo: PageInfo!
+
+  # A list of edges.
+  edges: [ChapterEdge]
 }
 
-# A scalar that can represent any JSON value.
-scalar JSON
+# An edge in a connection.
+type ChapterEdge {
+  # The item at the end of the edge
+  node: Chapter!
+
+  # A cursor for use in pagination
+  cursor: String!
+}
+
+type DownloadQueueEntry {
+  sourceId: Int!
+  sourceName: String!
+  mangaId: Int!
+  mangaTitle: String!
+  chapterId: Int!
+  chapterTitle: String!
+  downloaded: Int!
+  total: Int!
+  priority: Int!
+}
+
+scalar InputList
 
 type Manga {
   id: Int!
@@ -39,6 +70,7 @@ type Manga {
   genre: [String!]!
   status: String
   description: String
+  link: String!
   path: String!
   coverUrl: String!
   isFavorite: Boolean!
@@ -55,12 +87,16 @@ type Manga {
     id: Int!
   ): Chapter!
   nextChapter: Chapter
+  trackers: [Tracker!]!
 }
 
 type MutationRoot {
   addToLibrary(
     # manga id
     mangaId: Int!
+
+    # category ids
+    categoryIds: [Int!]!
   ): Int!
   deleteFromLibrary(
     # manga id
@@ -72,6 +108,9 @@ type MutationRoot {
 
     # page
     page: Int!
+
+    # is_complete
+    isComplete: Boolean!
   ): Int!
   markChapterAsRead(
     # chapter ids
@@ -80,6 +119,21 @@ type MutationRoot {
   markChapterAsUnread(
     # chapter ids
     chapterIds: [Int!]!
+  ): Int!
+  createCategory(
+    # category name
+    name: String!
+  ): Category!
+  updateCategory(
+    # category id
+    id: Int!
+
+    # category name
+    name: String!
+  ): Category!
+  deleteCategory(
+    # category id
+    id: Int!
   ): Int!
   register(
     # username
@@ -99,11 +153,31 @@ type MutationRoot {
     newPassword: String!
   ): Int!
   updateProfile(input: ProfileInput!): Int!
+  myanimelistLogout: Int!
   installSource(sourceId: Int!): Int!
   uninstallSource(sourceId: Int!): Int!
   updateSource(sourceId: Int!): Int!
+  setPreferences(sourceId: Int!, preferences: InputList!): Int!
+  pauseDownload: Boolean!
+  resumeDownload: Boolean!
+  downloadChapters(ids: [Int!]!): Int!
+  removeChaptersFromQueue(ids: [Int!]!): Int!
+  removeDownloadedChapters(ids: [Int!]!): Int!
+  updateChapterPriority(id: Int!, priority: Int!): Boolean!
+  trackManga(tracker: String!, mangaId: Int!, trackerMangaId: String!): Int!
+  untrackManga(tracker: String!, mangaId: Int!): Int!
+  updateTrackerStatus(
+    tracker: String!
+    trackerMangaId: String!
+    status: TrackerStatusInput!
+  ): Boolean!
 }
 
+# ISO 8601 combined date and time without timezone.
+#
+# # Examples
+#
+# * `2015-07-01T08:59:60.123`,
 scalar NaiveDateTime
 
 # Information about pagination in a connection
@@ -130,24 +204,32 @@ type QueryRoot {
   installedSources(checkUpdate: Boolean!): [Source!]!
   availableSources: [Source!]!
   source(sourceId: Int!): Source!
+  getPopularManga(
+    # source id
+    sourceId: Int!
+
+    # page
+    page: Int!
+  ): [Manga!]!
+  getLatestManga(
+    # source id
+    sourceId: Int!
+
+    # page
+    page: Int!
+  ): [Manga!]!
   browseSource(
     # source id
     sourceId: Int!
 
-    # keyword of the manga
-    keyword: String
-
-    # genres of the manga
-    genres: [String!]
-
     # page
-    page: Int
+    page: Int!
 
-    # sort by
-    sortBy: SortByParam
+    # query
+    query: String
 
-    # sort order
-    sortOrder: SortOrderParam
+    # filters
+    filters: InputList
   ): [Manga!]!
   mangaBySourcePath(
     # source id
@@ -170,6 +252,9 @@ type QueryRoot {
   library(
     # refresh data from source
     refresh: Boolean! = false
+
+    # category id
+    categoryId: Int
   ): [Manga!]!
   recentUpdates(
     after: String
@@ -183,6 +268,8 @@ type QueryRoot {
     first: Int
     last: Int
   ): RecentChapterConnection!
+  getCategories: [Category!]!
+  getCategory(id: Int): Category!
   login(
     # username
     username: String!
@@ -201,6 +288,24 @@ type QueryRoot {
     # pushover user key
     userKey: String!
   ): Boolean!
+  testDesktopNotification: Boolean!
+  downloadStatus: Boolean!
+  downloadQueue: [DownloadQueueEntry!]!
+  getDownloadedChapters(
+    after: String
+    before: String
+    first: Int
+    last: Int
+  ): ChapterConnection!
+  myanimelistLoginStart: Session!
+  myanimelistLoginEnd(
+    code: String!
+    state: String!
+    csrfState: String!
+    pkceCodeVerifier: String
+  ): String!
+  searchTrackerManga(tracker: String!, title: String!): [TrackerManga!]!
+  mangaTrackerStatus(mangaId: Int!): [TrackerStatus!]!
 }
 
 type ReadProgress {
@@ -262,33 +367,59 @@ type RecentUpdateEdge {
   cursor: String!
 }
 
-# A type represent sort parameter for query manga from source, normalized across sources
-enum SortByParam {
-  LAST_UPDATED
-  TITLE
-  COMMENT
-  VIEWS
-}
-
-# A type represent order parameter for query manga from source, normalized across sources
-enum SortOrderParam {
-  ASC
-  DESC
+type Session {
+  authorizeUrl: String!
+  csrfState: String!
+  pkceCodeVerifier: String
 }
 
 type Source {
   id: Int!
   name: String!
+  url: String!
   version: String!
   icon: String!
-  needLogin: Boolean!
   hasUpdate: Boolean!
-  filters: Filters
+  filters: InputList!
+  preferences: InputList!
 }
 
 type Status {
   activated: Boolean!
   version: String!
+}
+
+type Tracker {
+  tracker: String!
+  trackerMangaId: String
+}
+
+type TrackerManga {
+  tracker: String!
+  trackerMangaId: String!
+  title: String!
+  synopsis: String!
+  coverUrl: String!
+  status: String!
+}
+
+type TrackerStatus {
+  tracker: String!
+  trackerMangaId: String
+  trackerMangaTitle: String
+  status: String
+  score: Int
+  numChaptersRead: Int
+  startDate: NaiveDateTime
+  finishDate: NaiveDateTime
+}
+
+input TrackerStatusInput {
+  status: String
+  score: Int
+  numChaptersRead: Int
+  startDate: NaiveDateTime
+  finishDate: NaiveDateTime
 }
 
 type User {
@@ -297,4 +428,5 @@ type User {
   isAdmin: Boolean!
   telegramChatId: Int
   pushoverUserKey: String
+  myanimelistStatus: Boolean!
 }

@@ -1,59 +1,68 @@
-use std::fmt::Debug;
+use std::collections::HashMap;
 
-use crate::data::{Chapter, Manga, Param, Source, ExtensionResult, Filters};
+use crate::models::{ChapterInfo, Input, MangaInfo, SourceInfo};
+use anyhow::Result;
 
-/// `Extension` trait is an implementation for building extensions
 pub trait Extension: Send + Sync {
-    /// Returns the information of the source
-    fn detail(&self) -> Source;
+    fn get_source_info(&self) -> SourceInfo;
 
-    /// Returns filter supported by the source
-    fn filters(&self) -> ExtensionResult<Option<Filters>>;
+    fn headers(&self) -> HashMap<String, String> {
+        HashMap::new()
+    }
 
-    /// Returns list of manga from the source
-    ///
-    /// # Arguments
-    ///
-    /// * `param` - Parameter to filter manga from source
-    /// * `keyword` - Keyword of manga title to search
-    /// * `genres` - List of genres of manga to search
-    /// * `page` - Number of page
-    /// * `sort_by` - Sort results by SortByParam
-    /// * `sort_order` - Sort ascending or descending
-    /// * `auth` - If source need login to search, this param used to provide credentials
-    fn get_manga_list(&self, param: Param) -> ExtensionResult<Vec<Manga>>;
+    fn filter_list(&self) -> Vec<Input> {
+        vec![]
+    }
 
-    /// Returns detail of manga
-    fn get_manga_info(&self, path: String) -> ExtensionResult<Manga>;
+    fn get_preferences(&self) -> Result<Vec<Input>> {
+        Ok(vec![])
+    }
 
-    /// Returns list of chapters of a manga
-    fn get_chapters(&self, path: String) -> ExtensionResult<Vec<Chapter>>;
+    fn set_preferences(&mut self, _preferences: Vec<Input>) -> Result<()> {
+        Ok(())
+    }
 
-    /// Returns list of pages from a chapter of a manga
-    fn get_pages(&self, path: String) -> ExtensionResult<Vec<String>>;
+    fn get_popular_manga(&self, page: i64) -> Result<Vec<MangaInfo>>;
 
-    // /// Proxy image
-    // fn get_page(&self, url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    //     let bytes = {
-    //         let resp = ureq::get(url).call()?;
-    //         let mut reader = resp.into_reader();
-    //         let mut bytes = vec![];
-    //         if reader.read_to_end(&mut bytes).is_err() {
-    //             return Err(anyhow!("error read image"));
-    //         }
-    //         bytes
-    //     };
-    //     Ok(bytes)
-    // }
+    fn get_latest_manga(&self, page: i64) -> Result<Vec<MangaInfo>>;
 
-    // /// Login to source
-    // fn login(&self, _: SourceLogin) -> Result<SourceLoginResult, Box<dyn Error>> {
-    //     Err(anyhow!("not implemented"))
-    // }
+    fn search_manga(
+        &self,
+        page: i64,
+        query: Option<String>,
+        filters: Option<Vec<Input>>,
+    ) -> Result<Vec<MangaInfo>>;
+
+    fn get_manga_detail(&self, path: String) -> Result<MangaInfo>;
+
+    fn get_chapters(&self, path: String) -> Result<Vec<ChapterInfo>>;
+
+    fn get_pages(&self, path: String) -> Result<Vec<String>>;
 }
 
-impl Debug for dyn Extension {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Extension: {:?}", self.detail())
-    }
+/// A type represents an extension
+pub struct PluginDeclaration {
+    pub rustc_version: &'static str,
+    pub core_version: &'static str,
+    pub register: unsafe fn(&mut dyn PluginRegistrar),
+}
+
+/// A trait for register an extension
+pub trait PluginRegistrar {
+    fn register_function(&mut self, extension: Box<dyn Extension>);
+}
+
+/// macro for export an extension
+#[macro_export]
+macro_rules! export_plugin {
+    ($register:expr) => {
+        #[doc(hidden)]
+        #[no_mangle]
+        pub static plugin_declaration: $crate::extensions::PluginDeclaration =
+            $crate::extensions::PluginDeclaration {
+                rustc_version: $crate::RUSTC_VERSION,
+                core_version: $crate::LIB_VERSION,
+                register: $register,
+            };
+    };
 }

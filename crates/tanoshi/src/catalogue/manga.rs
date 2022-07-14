@@ -1,15 +1,26 @@
 use super::{Chapter, Source};
 use crate::{
+    config::GLOBAL_CONFIG,
     db::MangaDatabase,
-    user::{self, Secret},
+    loader::{
+        DatabaseLoader, UserFavoriteId, UserFavoritePath, UserLastReadId, UserTrackerMangaId,
+        UserUnreadChaptersId,
+    },
+    user::Claims,
     utils,
 };
-use async_graphql::{Context, Object, Result};
+use async_graphql::{dataloader::DataLoader, Context, Object, Result, SimpleObject};
 use chrono::NaiveDateTime;
-use tanoshi_vm::prelude::ExtensionBus;
+use tanoshi_vm::extension::SourceBus;
+
+#[derive(Debug, SimpleObject)]
+pub struct Tracker {
+    pub tracker: String,
+    pub tracker_manga_id: Option<String>,
+}
 
 /// A type represent manga details, normalized across source
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Manga {
     pub id: i64,
     pub source_id: i64,
@@ -23,14 +34,25 @@ pub struct Manga {
     pub date_added: chrono::NaiveDateTime,
 }
 
-impl From<&tanoshi_lib::data::Manga> for Manga {
-    fn from(m: &tanoshi_lib::data::Manga) -> Self {
-        m.clone().into()
+impl Default for Manga {
+    fn default() -> Self {
+        Self {
+            id: Default::default(),
+            source_id: Default::default(),
+            title: Default::default(),
+            author: Default::default(),
+            genre: Default::default(),
+            status: Default::default(),
+            description: Default::default(),
+            path: Default::default(),
+            cover_url: Default::default(),
+            date_added: NaiveDateTime::from_timestamp(0, 0),
+        }
     }
 }
 
-impl From<tanoshi_lib::data::Manga> for Manga {
-    fn from(m: tanoshi_lib::data::Manga) -> Self {
+impl From<tanoshi_lib::models::MangaInfo> for Manga {
+    fn from(m: tanoshi_lib::models::MangaInfo) -> Self {
         Self {
             id: 0,
             source_id: m.source_id,
@@ -63,8 +85,8 @@ impl From<crate::db::model::Manga> for Manga {
     }
 }
 
-impl From<tanoshi_lib::data::Manga> for crate::db::model::Manga {
-    fn from(m: tanoshi_lib::data::Manga) -> Self {
+impl From<tanoshi_lib::models::MangaInfo> for crate::db::model::Manga {
+    fn from(m: tanoshi_lib::models::MangaInfo) -> Self {
         Self {
             id: 0,
             source_id: m.source_id,
@@ -123,46 +145,35 @@ impl Manga {
         self.description.clone()
     }
 
+    async fn link(&self, ctx: &Context<'_>) -> Result<String> {
+        let detail = ctx.data::<SourceBus>()?.get_source_info(self.source_id)?;
+        Ok(format!("{}{}", detail.url, self.path))
+    }
+
     async fn path(&self) -> String {
         self.path.as_str().to_string()
     }
 
-    async fn cover_url(&self, ctx: &Context<'_>) -> String {
-        if let Ok(secret) = ctx.data::<Secret>() {
-            match utils::encrypt_url(&secret.0, &self.cover_url) {
-                Ok(encrypted_url) => {
-                    return encrypted_url;
-                }
-                Err(e) => {
-                    error!("error encrypt url: {}", e);
-                }
-            }
-        }
-
-        "".to_string()
+    async fn cover_url(&self) -> Result<String> {
+        let secret = &GLOBAL_CONFIG.get().ok_or("secret not set")?.secret;
+        Ok(utils::encrypt_url(secret, &self.cover_url)?)
     }
 
     async fn is_favorite(&self, ctx: &Context<'_>) -> Result<bool> {
-        let user = user::get_claims(ctx)?;
-        let mangadb = ctx.data::<MangaDatabase>()?;
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
 
-        let mut id = self.id;
-        if id == 0 {
-            if let Ok(manga) = mangadb
-                .get_manga_by_source_path(self.source_id, &self.path)
-                .await
-            {
-                id = manga.id;
-            } else {
-                return Ok(false);
-            }
-        }
-
-        if let Ok(fav) = mangadb.is_user_library(user.sub, id).await {
-            Ok(fav)
+        let loader = ctx.data::<DataLoader<DatabaseLoader>>()?;
+        let is_favorite: Option<bool> = if self.id == 0 {
+            loader
+                .load_one(UserFavoritePath(user.sub, self.path.clone()))
+                .await?
         } else {
-            Err("error query".into())
-        }
+            loader.load_one(UserFavoriteId(user.sub, self.id)).await?
+        };
+
+        Ok(is_favorite.unwrap_or(false))
     }
 
     async fn date_added(&self) -> chrono::NaiveDateTime {
@@ -170,28 +181,26 @@ impl Manga {
     }
 
     async fn unread_chapter_count(&self, ctx: &Context<'_>) -> Result<i64> {
-        let user = user::get_claims(ctx)?;
-        let mangadb = ctx.data::<MangaDatabase>()?;
-
-        let unread_chapter_count = mangadb
-            .get_user_library_unread_chapter(user.sub, self.id)
-            .await?;
-
-        Ok(unread_chapter_count)
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
+        let loader = ctx.data::<DataLoader<DatabaseLoader>>()?;
+        Ok(loader
+            .load_one(UserUnreadChaptersId(user.sub, self.id))
+            .await?
+            .unwrap_or(0))
     }
 
     async fn last_read_at(&self, ctx: &Context<'_>) -> Result<Option<NaiveDateTime>> {
-        let user = user::get_claims(ctx)?;
-        let mangadb = ctx.data::<MangaDatabase>()?;
-
-        Ok(mangadb
-            .get_last_read_at_by_user_id_and_manga_id(user.sub, self.id)
-            .await?)
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
+        let loader = ctx.data::<DataLoader<DatabaseLoader>>()?;
+        Ok(loader.load_one(UserLastReadId(user.sub, self.id)).await?)
     }
 
     async fn source(&self, ctx: &Context<'_>) -> Result<Source> {
-        let extensions = ctx.data::<ExtensionBus>()?;
-        let source = extensions.detail(self.source_id).await?;
+        let source = ctx.data::<SourceBus>()?.get_source_info(self.source_id)?;
         Ok(source.into())
     }
 
@@ -209,7 +218,7 @@ impl Manga {
         }
 
         let chapters: Vec<crate::db::model::Chapter> = ctx
-            .data::<ExtensionBus>()?
+            .data::<SourceBus>()?
             .get_chapters(self.source_id, self.path.clone())
             .await?
             .into_iter()
@@ -248,7 +257,9 @@ impl Manga {
 
     async fn next_chapter(&self, ctx: &Context<'_>) -> Result<Option<Chapter>> {
         let db = ctx.data::<MangaDatabase>()?.clone();
-        let user = user::get_claims(ctx)?;
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
 
         let mut id = self.id;
         if id == 0 {
@@ -266,5 +277,24 @@ impl Manga {
             .get_next_chapter_by_manga_id(user.sub, id)
             .await?
             .map(|c| c.into()))
+    }
+
+    async fn trackers(&self, ctx: &Context<'_>) -> Result<Vec<Tracker>> {
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
+        let loader = ctx.data::<DataLoader<DatabaseLoader>>()?;
+        let data = loader
+            .load_one(UserTrackerMangaId(user.sub, self.id))
+            .await?
+            .unwrap_or(vec![])
+            .into_iter()
+            .map(|(tracker, tracker_manga_id)| Tracker {
+                tracker,
+                tracker_manga_id,
+            })
+            .collect();
+
+        Ok(data)
     }
 }

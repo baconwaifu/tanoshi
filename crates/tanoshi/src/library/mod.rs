@@ -1,13 +1,24 @@
-use crate::catalogue::Manga;
-use crate::db::MangaDatabase;
-use crate::user;
-use async_graphql::connection::{query, Connection, Edge, EmptyFields};
+use crate::{
+    catalogue::Manga,
+    db::{model, MangaDatabase, UserDatabase},
+    tracker::{myanimelist, MyAnimeList},
+    user::Claims,
+    utils::{decode_cursor, encode_cursor},
+};
+use async_graphql::{
+    connection::{query, Connection, Edge, EmptyFields},
+    Error,
+};
 use async_graphql::{Context, Object, Result};
 use chrono::{Local, NaiveDateTime};
 
+mod categories;
+pub use categories::{Category, CategoryMutationRoot, CategoryRoot};
+
 mod recent;
 pub use recent::{RecentChapter, RecentUpdate};
-use tanoshi_vm::prelude::ExtensionBus;
+
+use tanoshi_vm::extension::SourceBus;
 
 #[derive(Default)]
 pub struct LibraryRoot;
@@ -18,17 +29,20 @@ impl LibraryRoot {
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "refresh data from source", default = false)] refresh: bool,
+        #[graphql(desc = "category id")] category_id: Option<i64>,
     ) -> Result<Vec<Manga>> {
-        let user = user::get_claims(ctx)?;
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
         let db = ctx.data::<MangaDatabase>()?;
-        let manga = db.get_library(user.sub).await?;
+        let manga = db.get_library_by_category_id(user.sub, category_id).await?;
 
         if refresh {
-            let extensions = ctx.data::<ExtensionBus>()?;
+            let extensions = ctx.data::<SourceBus>()?;
             for favorite_manga in manga.iter() {
-                let mut m: crate::db::model::Manga = {
+                let mut m: model::Manga = {
                     extensions
-                        .get_manga_info(favorite_manga.source_id, favorite_manga.path.clone())
+                        .get_manga_detail(favorite_manga.source_id, favorite_manga.path.clone())
                         .await?
                         .into()
                 };
@@ -49,7 +63,9 @@ impl LibraryRoot {
         first: Option<i32>,
         last: Option<i32>,
     ) -> Result<Connection<String, RecentUpdate, EmptyFields, EmptyFields>> {
-        let user = user::get_claims(ctx)?;
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
         let db = ctx.data::<MangaDatabase>()?;
         query(
             after,
@@ -59,7 +75,7 @@ impl LibraryRoot {
             |after, before, first, last| async move {
                 let (after_timestamp, after_id) = after
                     .and_then(|cursor: String| decode_cursor(&cursor).ok())
-                    .unwrap_or((Local::now().naive_local().timestamp(), 1));
+                    .unwrap_or((Local::now().timestamp(), 1));
                 let (before_timestamp, before_id) = before
                     .and_then(|cursor: String| decode_cursor(&cursor).ok())
                     .unwrap_or((0, 0));
@@ -125,7 +141,8 @@ impl LibraryRoot {
                         .into_iter()
                         .map(|e| Edge::new(encode_cursor(e.uploaded.timestamp(), e.chapter_id), e)),
                 );
-                Ok(connection)
+
+                Ok::<_, Error>(connection)
             },
         )
         .await
@@ -139,7 +156,9 @@ impl LibraryRoot {
         first: Option<i32>,
         last: Option<i32>,
     ) -> Result<Connection<String, RecentChapter, EmptyFields, EmptyFields>> {
-        let user = user::get_claims(ctx)?;
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
         let db = ctx.data::<MangaDatabase>()?;
         query(
             after,
@@ -147,10 +166,10 @@ impl LibraryRoot {
             first,
             last,
             |after, before, first, last| async move {
-                let (after_timestamp, after_id) = after
+                let (after_timestamp, _after_id) = after
                     .and_then(|cursor: String| decode_cursor(&cursor).ok())
                     .unwrap_or((Local::now().timestamp(), 1));
-                let (before_timestamp, before_id) = before
+                let (before_timestamp, _before_id) = before
                     .and_then(|cursor: String| decode_cursor(&cursor).ok())
                     .unwrap_or((NaiveDateTime::from_timestamp(0, 0).timestamp(), 0));
 
@@ -158,9 +177,7 @@ impl LibraryRoot {
                     db.get_first_read_chapters(
                         user.sub,
                         after_timestamp,
-                        after_id,
                         before_timestamp,
-                        before_id,
                         first as i32,
                     )
                     .await
@@ -168,14 +185,12 @@ impl LibraryRoot {
                     db.get_last_read_chapters(
                         user.sub,
                         after_timestamp,
-                        after_id,
                         before_timestamp,
-                        before_id,
                         last as i32,
                     )
                     .await
                 } else {
-                    db.get_read_chapters(after_timestamp, after_id, before_timestamp, before_id)
+                    db.get_read_chapters(after_timestamp, before_timestamp)
                         .await
                 };
                 let edges = edges.unwrap_or_default();
@@ -209,29 +224,12 @@ impl LibraryRoot {
                         .into_iter()
                         .map(|e| Edge::new(encode_cursor(e.read_at.timestamp(), e.manga_id), e)),
                 );
-                Ok(connection)
+
+                Ok::<_, Error>(connection)
             },
         )
         .await
     }
-}
-
-fn decode_cursor(cursor: &str) -> std::result::Result<(i64, i64), base64::DecodeError> {
-    match base64::decode(cursor) {
-        Ok(res) => {
-            let cursor = String::from_utf8(res).unwrap();
-            let decoded = cursor
-                .split('#')
-                .map(|s| s.parse::<i64>().unwrap())
-                .collect::<Vec<i64>>();
-            Ok((decoded[0], decoded[1]))
-        }
-        Err(err) => Err(err),
-    }
-}
-
-fn encode_cursor(timestamp: i64, id: i64) -> String {
-    base64::encode(format!("{}#{}", timestamp, id))
 }
 
 #[derive(Default)]
@@ -243,11 +241,14 @@ impl LibraryMutationRoot {
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "manga id")] manga_id: i64,
+        #[graphql(desc = "category ids")] category_ids: Vec<i64>,
     ) -> Result<u64> {
-        let user = user::get_claims(ctx)?;
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
         match ctx
             .data::<MangaDatabase>()?
-            .insert_user_library(user.sub, manga_id)
+            .insert_user_library(user.sub, manga_id, category_ids)
             .await
         {
             Ok(rows) => Ok(rows),
@@ -260,7 +261,9 @@ impl LibraryMutationRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "manga id")] manga_id: i64,
     ) -> Result<u64> {
-        let user = user::get_claims(ctx)?;
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
         match ctx
             .data::<MangaDatabase>()?
             .delete_user_library(user.sub, manga_id)
@@ -276,16 +279,62 @@ impl LibraryMutationRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "chapter id")] chapter_id: i64,
         #[graphql(desc = "page")] page: i64,
+        #[graphql(desc = "is_complete")] is_complete: bool,
     ) -> Result<u64> {
-        let user = user::get_claims(ctx)?;
-        match ctx
-            .data::<MangaDatabase>()?
-            .update_page_read_at(user.sub, chapter_id, page)
-            .await
-        {
-            Ok(rows) => Ok(rows),
-            Err(err) => Err(format!("error update page read_at: {}", err).into()),
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
+
+        let mangadb = ctx.data::<MangaDatabase>()?;
+        let rows = mangadb
+            .update_page_read_at(user.sub, chapter_id, page, is_complete)
+            .await?;
+
+        let chapter = mangadb.get_chapter_by_id(chapter_id).await?;
+        // TODO: nepnep source have weird number, don't update tracker status for them for now
+        if is_complete && chapter.source_id != 3 && chapter.source_id != 4 {
+            let trackers = mangadb
+                .get_tracker_manga_id(user.sub, chapter.manga_id)
+                .await?;
+            for tracker in trackers {
+                match (
+                    tracker.tracker.as_str(),
+                    tracker.tracker_manga_id.to_owned(),
+                ) {
+                    (myanimelist::NAME, Some(tracker_manga_id)) => {
+                        let tracker_token = ctx
+                            .data::<UserDatabase>()?
+                            .get_user_tracker_token(myanimelist::NAME, user.sub)
+                            .await?;
+                        let mal_client = ctx.data::<MyAnimeList>()?;
+                        let tracker_data = mal_client
+                            .get_manga_details(
+                                tracker_token.access_token.clone(),
+                                tracker_manga_id.to_owned(),
+                                "my_list_status".to_string(),
+                            )
+                            .await?;
+
+                        if let Some(status) = tracker_data.my_list_status {
+                            if chapter.number < status.num_chapters_read as f64 {
+                                continue;
+                            }
+                        }
+
+                        mal_client
+                            .update_my_list_status(
+                                tracker_token.access_token,
+                                tracker_manga_id,
+                                &[("num_chapters_read", &format!("{}", chapter.number))],
+                            )
+                            .await?;
+                    }
+                    (_, _) => {}
+                }
+            }
         }
+
+        Ok(rows)
     }
 
     async fn mark_chapter_as_read(
@@ -293,14 +342,16 @@ impl LibraryMutationRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "chapter ids")] chapter_ids: Vec<i64>,
     ) -> Result<u64> {
-        let user = user::get_claims(ctx)?;
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
         match ctx
             .data::<MangaDatabase>()?
             .update_chapters_read_at(user.sub, &chapter_ids)
             .await
         {
             Ok(rows) => Ok(rows),
-            Err(err) => Err(format!("error update chapter read_at: {}", err).into()),
+            Err(err) => Err(format!("error mark_chapter_as_read: {}", err).into()),
         }
     }
 
@@ -309,7 +360,9 @@ impl LibraryMutationRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "chapter ids")] chapter_ids: Vec<i64>,
     ) -> Result<u64> {
-        let user = user::get_claims(ctx)?;
+        let user = ctx
+            .data::<Claims>()
+            .map_err(|_| "token not exists, please login")?;
         match ctx
             .data::<MangaDatabase>()?
             .delete_chapters_read_at(user.sub, &chapter_ids)

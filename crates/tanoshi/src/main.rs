@@ -7,26 +7,36 @@ mod assets;
 mod catalogue;
 mod config;
 mod db;
+mod downloads;
+mod guard;
 mod library;
+mod loader;
 mod local;
+mod notification;
 mod notifier;
 mod proxy;
 mod schema;
 mod server;
 mod status;
+mod tracker;
+mod tracking;
 mod user;
 mod utils;
 mod worker;
 
-use crate::{config::Config, notifier::pushover::Pushover};
-use clap::Clap;
+use crate::{
+    config::{Config, GLOBAL_CONFIG},
+    notifier::pushover::Pushover,
+    proxy::Proxy,
+    tracker::MyAnimeList,
+};
+use clap::Parser;
 use futures::future::OptionFuture;
-use tanoshi_vm::{bus::ExtensionBus, vm};
+use tanoshi_vm::{extension::SourceBus, prelude::Source};
 
-use std::sync::Arc;
 use teloxide::prelude::RequesterExt;
 
-#[derive(Clap)]
+#[derive(Parser)]
 struct Opts {
     /// Path to config file
     #[clap(long)]
@@ -34,7 +44,7 @@ struct Opts {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), anyhow::Error> {
     if let Ok(rust_log) = std::env::var("RUST_LOG") {
         info!("rust_log: {}", rust_log);
     } else if let Ok(tanoshi_log) = std::env::var("TANOSHI_LOG") {
@@ -48,63 +58,113 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let opts: Opts = Opts::parse();
-    let config = Config::open(opts.config)?;
+    let config =
+        GLOBAL_CONFIG.get_or_init(|| Config::open(opts.config).expect("failed to init config"));
+
+    debug!("config: {:?}", config);
 
     let pool = db::establish_connection(&config.database_path).await?;
     let mangadb = db::MangaDatabase::new(pool.clone());
     let userdb = db::UserDatabase::new(pool.clone());
 
-    let (vm_handle, extension_tx) = vm::start();
-    vm::load(&config.plugin_path, extension_tx.clone()).await?;
+    let extension_manager = SourceBus::new(&config.plugin_path);
 
-    let extension_bus = ExtensionBus::new(&config.plugin_path, extension_tx);
+    extension_manager.load_all().await?;
 
-    extension_bus
-        .insert(
-            local::ID,
-            Arc::new(local::Local::new(config.local_path.clone())),
-        )
-        .await?;
+    match &config.local_path {
+        config::LocalFolders::Single(local_path) => {
+            extension_manager
+                .insert(Source::from(Box::new(local::Local::new(
+                    10000,
+                    "Local".to_string(),
+                    local_path,
+                ))))
+                .await?;
+        }
+        config::LocalFolders::Multiple(local_paths) => {
+            for (index, local_path) in local_paths.iter().enumerate() {
+                // source id starts from 10000
+                let index = index + 10000;
+                extension_manager
+                    .insert(Source::from(Box::new(local::Local::new(
+                        index as i64,
+                        local_path.name.clone(),
+                        &local_path.path,
+                    ))))
+                    .await?;
+            }
+        }
+    }
 
-    let mut telegram_bot = None;
+    let mut notifier_builder = notifier::Builder::new(userdb.clone());
+
     let mut telegram_bot_fut: OptionFuture<_> = None.into();
     if let Some(telegram_config) = config.telegram.clone() {
         let bot = teloxide::Bot::new(telegram_config.token)
             .auto_send()
             .parse_mode(teloxide::types::ParseMode::Html);
-        telegram_bot_fut = Some(notifier::telegram::run(telegram_config.name, bot.clone())).into();
-        telegram_bot = Some(bot);
+        telegram_bot_fut = Some(notifier::telegram::run(bot.clone())).into();
+        notifier_builder = notifier_builder.telegram(bot);
     }
 
-    let pushover = config
-        .pushover
-        .clone()
-        .map(|pushover_cfg| Pushover::new(pushover_cfg.application_key));
+    if let Some(pushover_cfg) = config.pushover.as_ref() {
+        notifier_builder =
+            notifier_builder.pushover(Pushover::new(pushover_cfg.application_key.clone()));
+    }
 
-    let (worker_handle, worker_tx) = worker::worker::start(telegram_bot, pushover);
+    let notifier = notifier_builder.finish();
+
+    let (download_tx, download_worker_handle) = worker::downloads::start(
+        &config.download_path,
+        mangadb.clone(),
+        extension_manager.clone(),
+        notifier.clone(),
+    );
 
     let update_worker_handle = worker::updates::start(
         config.update_interval,
-        userdb.clone(),
         mangadb.clone(),
-        extension_bus.clone(),
-        worker_tx.clone(),
+        extension_manager.clone(),
+        download_tx.clone(),
+        notifier.clone(),
     );
 
-    let server_fut = server::serve::<()>(userdb, mangadb, &config, extension_bus, worker_tx);
+    let mal_client = config
+        .base_url
+        .clone()
+        .zip(config.myanimelist.clone())
+        .and_then(|(base_url, mal_cfg)| {
+            MyAnimeList::new(
+                &base_url,
+                mal_cfg.client_id.clone(),
+                mal_cfg.client_secret.clone(),
+            )
+            .ok()
+        });
+
+    let schema = schema::build(
+        userdb.clone(),
+        mangadb,
+        extension_manager,
+        download_tx,
+        notifier,
+        mal_client,
+    );
+
+    let proxy = Proxy::new(config.secret.clone());
+
+    let app = server::init_app(config.enable_playground, schema, proxy);
+    let server_fut = server::serve("0.0.0.0", config.port, app);
 
     tokio::select! {
         _ = server_fut => {
             info!("server shutdown");
         }
-        _ = vm_handle => {
-            info!("vm quit");
-        }
-        _ = worker_handle => {
-            info!("worker quit");
-        }
         _ = update_worker_handle => {
             info!("update worker quit");
+        }
+        _ = download_worker_handle => {
+            info!("download worker quit");
         }
         Some(_) = telegram_bot_fut => {
             info!("worker shutdown");

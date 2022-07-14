@@ -1,13 +1,10 @@
-use std::convert::Infallible;
-
 use axum::{
-    body::{Body, Bytes, Full},
-    http::{header, Response, StatusCode},
-    response::IntoResponse,
+    body::{boxed, Body, Full},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
 };
 
 use http::Request;
-use mime_guess;
 use rust_embed::RustEmbed;
 
 // static_handler is a handler that serves static files from the
@@ -33,14 +30,11 @@ impl<T> IntoResponse for StaticFile<T>
 where
     T: Into<String>,
 {
-    type Body = Full<Bytes>;
-    type BodyError = Infallible;
-
-    fn into_response(self) -> Response<Self::Body> {
+    fn into_response(self) -> Response {
         let path = self.0.into();
         match Asset::get(path.as_str()) {
             Some(content) => {
-                let body = content.data.into();
+                let body = boxed(Full::from(content.data));
                 let mime = mime_guess::from_path(path).first_or_octet_stream();
                 Response::builder()
                     .header(header::CONTENT_TYPE, mime.as_ref())
@@ -49,7 +43,7 @@ where
             }
             None => Response::builder()
                 .status(StatusCode::NOT_FOUND)
-                .body(Full::from("404"))
+                .body(boxed(Full::from("404")))
                 .unwrap(),
         }
     }

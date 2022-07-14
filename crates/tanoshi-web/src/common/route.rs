@@ -4,29 +4,46 @@ use futures_signals::signal::{Signal, SignalExt};
 use wasm_bindgen::prelude::*;
 use web_sys::Url;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum SettingCategory {
     None,
     Appearance,
-    General,
+    Chapters,
     Reader,
+    Library,
+    Category,
+    SourceList,
     Source(i64),
     Users,
     CreateUser,
     User,
+    DownloadQueue,
 }
 
 #[derive(Debug)]
 pub enum Route {
+    Root,
     Login,
-    Library,
-    Catalogue { id: i64, latest: bool },
+    LibraryList,
+    Library(Option<i64>),
+    CatalogueList,
+    Catalogue {
+        id: i64,
+        latest: bool,
+        query: Option<String>,
+    },
     Manga(i64),
     MangaBySourcePath(i64, String),
     Chapter(i64, i64),
     Updates,
     Histories,
     Settings(SettingCategory),
+    TrackerLogin(String),
+    TrackerRedirect {
+        tracker: String,
+        code: String,
+        state: String,
+    },
     NotFound,
 }
 
@@ -41,23 +58,35 @@ impl Route {
 
                 match paths.as_slice() {
                     ["login"] => Route::Login,
-                    [] => Route::Library,
+                    [] => Route::Root,
+                    ["libraries"] => Route::LibraryList,
+                    ["library"] => Route::Library(None),
+                    ["library", category_id] => Route::Library(category_id.parse().ok()),
                     ["updates"] => Route::Updates,
                     ["histories"] => Route::Histories,
-                    ["catalogue"] => Route::Catalogue {
-                        id: 0,
-                        latest: false,
-                    },
+                    ["catalogue"] => Route::CatalogueList,
                     ["catalogue", id] => {
                         if let Ok(id) = id.parse() {
-                            Route::Catalogue { id, latest: false }
+                            let params = url.search_params();
+                            let query = params.get("keyword");
+                            Route::Catalogue {
+                                id,
+                                latest: false,
+                                query,
+                            }
                         } else {
                             Route::NotFound
                         }
                     }
                     ["catalogue", id, "latest"] => {
                         if let Ok(id) = id.parse() {
-                            Route::Catalogue { id, latest: true }
+                            let params = url.search_params();
+                            let query = params.get("keyword");
+                            Route::Catalogue {
+                                id,
+                                latest: true,
+                                query,
+                            }
                         } else {
                             Route::NotFound
                         }
@@ -100,11 +129,14 @@ impl Route {
                     ["settings"] => Route::Settings(SettingCategory::None),
                     ["settings", cat] => match *cat {
                         "appearance" => Route::Settings(SettingCategory::Appearance),
-                        "general" => Route::Settings(SettingCategory::General),
+                        "chapters" => Route::Settings(SettingCategory::Chapters),
+                        "library" => Route::Settings(SettingCategory::Library),
+                        "category" => Route::Settings(SettingCategory::Category),
                         "reader" => Route::Settings(SettingCategory::Reader),
-                        "sources" => Route::Settings(SettingCategory::Source(0)),
+                        "sources" => Route::Settings(SettingCategory::SourceList),
                         "users" => Route::Settings(SettingCategory::Users),
                         "user" => Route::Settings(SettingCategory::User),
+                        "downloads-queue" => Route::Settings(SettingCategory::DownloadQueue),
                         _ => Route::NotFound,
                     },
                     ["settings", "users", "create"] => Route::Settings(SettingCategory::CreateUser),
@@ -115,6 +147,22 @@ impl Route {
                             Route::NotFound
                         }
                     }
+                    ["tracker", tracker, "login"] => Route::TrackerLogin(tracker.to_string()),
+                    ["tracker", tracker, "redirect"] => {
+                        let params = url.search_params();
+                        let code = params.get("code");
+                        let state = params.get("state");
+                        match *tracker {
+                            "myanimelist" if code.is_some() && state.is_some() => {
+                                Route::TrackerRedirect {
+                                    tracker: tracker.to_string(),
+                                    code: code.unwrap(),
+                                    state: state.unwrap(),
+                                }
+                            }
+                            _ => Route::NotFound,
+                        }
+                    }
                     _ => Route::NotFound,
                 }
             })
@@ -122,21 +170,28 @@ impl Route {
 
     pub fn url(&self) -> String {
         match self {
+            Route::Root => "/".to_string(),
             Route::Login => "/login".to_string(),
-            Route::Library => "/".to_string(),
-            Route::Catalogue { id, latest } => {
-                if *id > 0 && *latest {
-                    [
-                        "/catalogue".to_string(),
-                        id.to_string(),
-                        "latest".to_string(),
-                    ]
-                    .join("/")
-                } else if *id > 0 && !*latest {
-                    ["/catalogue".to_string(), id.to_string()].join("/")
+            Route::LibraryList => "/libraries".to_string(),
+            Route::Library(category_id) => {
+                if let Some(id) = category_id {
+                    format!("/library/{}", id)
                 } else {
-                    "/catalogue".to_string()
+                    "/library".to_string()
                 }
+            }
+            Route::CatalogueList => "/catalogue".to_string(),
+            Route::Catalogue { id, latest, query } => {
+                if *latest {
+                    return format!("/catalogue/{}/latest", id);
+                }
+
+                let mut param = vec![];
+                if let Some(query) = query {
+                    param.push(format!("query={}", query));
+                }
+
+                format!("/catalogue/{}?{}", id, param.join("&"))
             }
             Route::Manga(manga_id) => ["/manga".to_string(), manga_id.to_string()].join("/"),
             Route::MangaBySourcePath(source_id, path) => [
@@ -152,18 +207,26 @@ impl Route {
             Route::Histories => "/histories".to_string(),
             Route::Settings(SettingCategory::None) => "/settings".to_string(),
             Route::Settings(SettingCategory::Appearance) => "/settings/appearance".to_string(),
-            Route::Settings(SettingCategory::General) => "/settings/general".to_string(),
+            Route::Settings(SettingCategory::Chapters) => "/settings/chapters".to_string(),
+            Route::Settings(SettingCategory::Library) => "/settings/library".to_string(),
+            Route::Settings(SettingCategory::Category) => "/settings/category".to_string(),
             Route::Settings(SettingCategory::Reader) => "/settings/reader".to_string(),
+            Route::Settings(SettingCategory::SourceList) => "/settings/sources".to_string(),
             Route::Settings(SettingCategory::Source(source_id)) => {
-                if *source_id > 0 {
-                    format!("/settings/sources/{}", source_id)
-                } else {
-                    "/settings/sources".to_string()
-                }
+                format!("/settings/sources/{}", source_id)
             }
             Route::Settings(SettingCategory::Users) => "/settings/users".to_string(),
             Route::Settings(SettingCategory::CreateUser) => "/settings/users/create".to_string(),
             Route::Settings(SettingCategory::User) => "/settings/user".to_string(),
+            Route::Settings(SettingCategory::DownloadQueue) => {
+                "/settings/downloads-queue".to_string()
+            }
+            Route::TrackerLogin(tracker) => format!("/tracker/{tracker}/login"),
+            Route::TrackerRedirect {
+                tracker,
+                code,
+                state,
+            } => format!("/tracker/{tracker}/redirect?code={code}&state={state}"),
             Route::NotFound => "/notfound".to_string(),
         }
     }

@@ -1,9 +1,12 @@
+use once_cell::sync::OnceCell;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::{iter, path::PathBuf, str::FromStr};
 use std::net::IpAddr;
+
+pub static GLOBAL_CONFIG: OnceCell<Config> = OnceCell::new();
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct TelegramConfig {
@@ -17,11 +20,34 @@ pub struct PushoverConfig {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct MyAnimeListConfig {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LocalFolder {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum LocalFolders {
+    Single(String),
+    Multiple(Vec<LocalFolder>),
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Config {
     #[serde(skip)]
     path: PathBuf,
     #[serde(default = "default_bind_ip")]
     pub bind_ip: IpAddr,
+    #[serde(skip, default = "default_extension_repository")]
+    pub extension_repository: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default = "default_database_path")]
@@ -30,30 +56,43 @@ pub struct Config {
     pub secret: String,
     #[serde(default = "default_update_interval")]
     pub update_interval: u64,
+    #[serde(default)]
+    pub auto_download_chapters: bool,
     #[serde(default = "default_plugin_path")]
     pub plugin_path: String,
-    #[serde(default = "default_local_path")]
-    pub local_path: String,
+    #[serde(default = "default_local_folders")]
+    pub local_path: LocalFolders,
+    #[serde(default = "default_download_path")]
+    pub download_path: String,
     #[serde(default)]
     pub enable_playground: bool,
     pub telegram: Option<TelegramConfig>,
     pub pushover: Option<PushoverConfig>,
+    pub myanimelist: Option<MyAnimeListConfig>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             path: tanoshi_home().join("config.yml"),
+<<<<<<< HEAD
             bind_ip: default_bind_ip(),
+=======
+            extension_repository: default_extension_repository(),
+            base_url: None,
+>>>>>>> 5e73fbe712e49e0771bb8be729cb7b337fa56f21
             port: default_port(),
             database_path: default_database_path(),
             secret: default_secret(),
             update_interval: default_update_interval(),
+            auto_download_chapters: false,
             plugin_path: default_plugin_path(),
-            local_path: default_local_path(),
+            local_path: default_local_folders(),
+            download_path: default_download_path(),
             enable_playground: false,
             telegram: None,
             pushover: None,
+            myanimelist: None,
         }
     }
 }
@@ -76,6 +115,10 @@ fn default_port() -> u16 {
     80
 }
 
+fn default_extension_repository() -> String {
+    "https://raw.githubusercontent.com/faldez/tanoshi-extensions/repository".to_string()
+}
+
 fn default_update_interval() -> u64 {
     3600
 }
@@ -94,7 +137,7 @@ fn default_database_path() -> String {
     if !path.exists() {
         let _ = std::fs::create_dir_all(&path);
     }
-    path.join("tanoshi.db").to_str().unwrap().to_string()
+    path.join("tanoshi.db").display().to_string()
 }
 
 fn default_plugin_path() -> String {
@@ -102,7 +145,11 @@ fn default_plugin_path() -> String {
     if !path.exists() {
         let _ = std::fs::create_dir_all(&path);
     }
-    path.to_str().unwrap().to_string()
+    path.display().to_string()
+}
+
+fn default_local_folders() -> LocalFolders {
+    LocalFolders::Single(default_local_path())
 }
 
 fn default_local_path() -> String {
@@ -110,11 +157,19 @@ fn default_local_path() -> String {
     if !path.exists() {
         let _ = std::fs::create_dir_all(&path);
     }
-    path.to_str().unwrap().to_string()
+    path.display().to_string()
+}
+
+fn default_download_path() -> String {
+    let path = tanoshi_home().join("downloads");
+    if !path.exists() {
+        let _ = std::fs::create_dir_all(&path);
+    }
+    path.display().to_string()
 }
 
 impl Config {
-    pub fn open<P: AsRef<Path>>(path: Option<P>) -> Result<Config, Box<dyn std::error::Error>> {
+    pub fn open<P: AsRef<Path>>(path: Option<P>) -> Result<Config, anyhow::Error> {
         let config_path = match path {
             Some(p) => PathBuf::new().join(p),
             None => tanoshi_home().join("config.yml"),
@@ -139,7 +194,7 @@ impl Config {
         }
     }
 
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(&self) -> Result<(), anyhow::Error> {
         std::fs::write(&self.path, serde_yaml::to_string(&self)?)?;
 
         Ok(())

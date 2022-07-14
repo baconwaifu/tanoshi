@@ -8,8 +8,13 @@ query FetchMangaDetail($id: Int, $refresh: Boolean) {
     description
     status
     isFavorite
+    link
     source {
       name
+    }
+    trackers {
+      tracker
+      trackerMangaId
     }
     nextChapter {
       id
@@ -30,6 +35,7 @@ query FetchMangaDetail($id: Int, $refresh: Boolean) {
         lastPage
         isComplete
       }
+      downloadedPath
     }
   }
 }

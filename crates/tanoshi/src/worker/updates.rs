@@ -1,55 +1,47 @@
-use std::{collections::HashMap, fmt::Display, str::FromStr};
+use std::{collections::HashMap, str::FromStr};
 
 use serde::Deserialize;
-use tanoshi_lib::prelude::Version;
 
-use tanoshi_vm::prelude::ExtensionBus;
-use tokio::sync::mpsc::Sender;
+use tanoshi_lib::prelude::Version;
+use tanoshi_vm::extension::SourceBus;
+
+use crate::{
+    catalogue::Source,
+    config::GLOBAL_CONFIG,
+    db::{model::Chapter, MangaDatabase},
+    notifier::Notifier,
+    worker::downloads::Command as DownloadCommand,
+};
+use anyhow::anyhow;
 use tokio::{
     task::JoinHandle,
     time::{self, Instant},
 };
 
-use crate::{
-    db::{
-        model::{Chapter, User},
-        MangaDatabase, UserDatabase,
-    },
-    worker::Command as WorkerCommand,
-};
+use super::downloads::DownloadSender;
 
-#[derive(Debug, Clone)]
-struct ChapterUpdate {
-    manga_title: String,
-    cover_url: String,
-    title: String,
-}
-
-impl Display for ChapterUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let manga_title = html_escape::encode_safe(&self.manga_title).to_string();
-        let title = html_escape::encode_safe(&self.title).to_string();
-
-        write!(f, "<b>{}</b>\n{}", manga_title, title)
-    }
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn malloc_trim(pad: usize) -> std::os::raw::c_int;
 }
 
 struct UpdatesWorker {
     period: u64,
     client: reqwest::Client,
-    userdb: UserDatabase,
     mangadb: MangaDatabase,
-    extensions: ExtensionBus,
-    worker_tx: Sender<WorkerCommand>,
+    extensions: SourceBus,
+    auto_download_chapters: bool,
+    download_tx: DownloadSender,
+    notifier: Notifier,
 }
 
 impl UpdatesWorker {
     fn new(
         period: u64,
-        userdb: UserDatabase,
         mangadb: MangaDatabase,
-        extensions: ExtensionBus,
-        worker_tx: Sender<WorkerCommand>,
+        extensions: SourceBus,
+        download_tx: DownloadSender,
+        notifier: Notifier,
     ) -> Self {
         #[cfg(not(debug_assertions))]
         let period = if period > 0 && period < 3600 {
@@ -58,20 +50,25 @@ impl UpdatesWorker {
             period
         };
         info!("periodic updates every {} seconds", period);
+
+        let auto_download_chapters = GLOBAL_CONFIG
+            .get()
+            .map(|cfg| cfg.auto_download_chapters)
+            .unwrap_or(false);
+
         Self {
             period,
             client: reqwest::Client::new(),
-            userdb,
             mangadb,
             extensions,
-            worker_tx,
+            auto_download_chapters,
+            download_tx,
+            notifier,
         }
     }
 
     async fn check_chapter_update(&self) -> Result<(), anyhow::Error> {
         let manga_in_library = self.mangadb.get_all_user_library().await?;
-
-        let mut user_map: HashMap<i64, User> = HashMap::new();
 
         for item in manga_in_library {
             let last_uploaded_chapter = self
@@ -80,7 +77,7 @@ impl UpdatesWorker {
                 .await
                 .map(|ch| ch.uploaded);
 
-            info!("Checking updates: {}", item.manga.title);
+            debug!("Checking updates: {}", item.manga.title);
 
             let chapters = match self
                 .extensions
@@ -104,131 +101,105 @@ impl UpdatesWorker {
                 }
             };
 
-            if let Err(e) = self.mangadb.insert_chapters(&chapters).await {
-                error!("error inserting new chapters, reason: {}", e);
-                continue;
-            }
-
-            let chapters = if let Some(last_uploaded_chapter) = last_uploaded_chapter {
-                chapters
-                    .into_iter()
-                    .filter(|ch| ch.uploaded > last_uploaded_chapter)
-                    .collect()
-            } else {
-                chapters
-            };
-
-            info!("Found: {} new chapters", chapters.len());
-
+            let mut new_chapter_count = 0;
             for chapter in chapters {
+                let chapter_id = match self.mangadb.insert_chapter(&chapter).await {
+                    Ok(chapter_id) => chapter_id,
+                    Err(e) => {
+                        error!("error inserting new chapters, reason: {}", e);
+                        continue;
+                    }
+                };
+
+                if let Some(last_uploaded_chapter) = last_uploaded_chapter {
+                    if chapter.uploaded < last_uploaded_chapter {
+                        continue;
+                    }
+                }
+
+                new_chapter_count += 1;
+
+                #[cfg(feature = "desktop")]
+                if let Err(e) = self
+                    .notifier
+                    .send_desktop_notification(Some(item.manga.title.clone()), &chapter.title)
+                {
+                    error!("failed to send notification, reason {}", e);
+                }
+
                 for user_id in item.user_ids.iter() {
-                    let user = match user_map.get(user_id) {
-                        Some(user) => user.to_owned(),
-                        None => {
-                            let user = self.userdb.get_user_by_id(*user_id).await?;
-                            user_map.insert(*user_id, user.to_owned());
-                            user
-                        }
-                    };
-
-                    if let Some(chat_id) = user.telegram_chat_id {
-                        let update = ChapterUpdate {
-                            manga_title: item.manga.title.clone(),
-                            cover_url: item.manga.cover_url.clone(),
-                            title: chapter.title.clone(),
-                        };
-                        if let Err(e) = self
-                            .worker_tx
-                            .send(WorkerCommand::TelegramMessage(chat_id, update.to_string()))
-                            .await
-                        {
-                            error!("failed to send message, reason: {}", e);
-                        }
+                    if let Err(e) = self
+                        .notifier
+                        .send_chapter_notification(
+                            *user_id,
+                            &item.manga.title,
+                            &chapter.title,
+                            chapter_id,
+                        )
+                        .await
+                    {
+                        error!("failed to send notification, reason {}", e);
                     }
+                }
 
-                    if let Some(user_key) = user.pushover_user_key {
-                        if let Err(e) = self
-                            .worker_tx
-                            .send(WorkerCommand::PushoverMessage {
-                                user_key,
-                                title: Some(item.manga.title.clone()),
-                                body: chapter.title.clone(),
-                            })
-                            .await
-                        {
-                            error!("failed to send PushoverMessage, reason: {}", e);
-                        }
-                    }
+                if self.auto_download_chapters {
+                    info!("add chapter to download queue");
+                    self.download_tx
+                        .send(DownloadCommand::InsertIntoQueueBySourcePath(
+                            chapter.source_id,
+                            chapter.path,
+                        ))
+                        .unwrap();
                 }
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            info!(
+                "Found: {} has {new_chapter_count} new chapters",
+                item.manga.title,
+            );
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
         Ok(())
     }
 
     async fn check_extension_update(&self) -> Result<(), anyhow::Error> {
-        #[derive(Debug, Clone, Deserialize)]
-        pub struct SourceIndex {
-            pub id: i64,
-            pub name: String,
-            pub path: String,
-            pub version: String,
-            pub icon: String,
-        }
-
-        let url = "https://faldez.github.io/tanoshi-extensions".to_string();
+        let url = GLOBAL_CONFIG
+            .get()
+            .map(|cfg| format!("{}/index.json", cfg.extension_repository))
+            .ok_or(anyhow!("no config set"))?;
         let available_sources_map = self
             .client
             .get(&url)
             .send()
             .await?
-            .json::<Vec<SourceIndex>>()
+            .json::<Vec<Source>>()
             .await?
             .into_iter()
             .map(|source| (source.id, source))
-            .collect::<HashMap<i64, SourceIndex>>();
+            .collect::<HashMap<i64, Source>>();
 
-        let admins = self.userdb.get_admins().await?;
-        let installed_sources = self
-            .extensions
-            .list()
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let installed_sources = self.extensions.list().await?;
 
         for source in installed_sources {
             if available_sources_map
                 .get(&source.id)
                 .and_then(|index| Version::from_str(&index.version).ok())
-                .map(|v| v > source.version)
+                .map(|v| v > Version::from_str(source.version).unwrap_or_default())
                 .unwrap_or(false)
             {
-                for admin in admins.iter() {
-                    let message = format!("{} extension update available", source.name);
-                    if let Some(chat_id) = admin.telegram_chat_id {
-                        if let Err(e) = self
-                            .worker_tx
-                            .send(WorkerCommand::TelegramMessage(chat_id, message.clone()))
-                            .await
-                        {
-                            error!("failed to send message, reason: {}", e);
-                        }
-                    }
+                let message = format!("{} extension update available", source.name);
+                if let Err(e) = self.notifier.send_all_to_admins(None, &message).await {
+                    error!("failed to send extension update to admin, {}", e);
+                }
 
-                    if let Some(user_key) = admin.pushover_user_key.clone() {
-                        if let Err(e) = self
-                            .worker_tx
-                            .send(WorkerCommand::PushoverMessage {
-                                user_key,
-                                title: None,
-                                body: message.clone(),
-                            })
-                            .await
-                        {
-                            error!("failed to send PushoverMessage, reason: {}", e);
-                        }
-                    }
+                #[cfg(feature = "desktop")]
+                if let Err(e) = self
+                    .notifier
+                    .send_desktop_notification(Some("Extension Update".to_string()), &message)
+                {
+                    error!("failed to send notification, reason {}", e);
                 }
             }
         }
@@ -259,33 +230,17 @@ impl UpdatesWorker {
             > Version::from_str(env!("CARGO_PKG_VERSION"))?
         {
             info!("new server update found!");
-            let admins = self.userdb.get_admins().await?;
-            for admin in admins {
-                let msg = format!("Tanoshi {} Released\n{}", release.tag_name, release.body);
+            let message = format!("Tanoshi {} Released\n{}", release.tag_name, release.body);
+            if let Err(e) = self.notifier.send_all_to_admins(None, &message).await {
+                error!("failed to send extension update to admin, {}", e);
+            }
 
-                if let Some(chat_id) = admin.telegram_chat_id {
-                    if let Err(e) = self
-                        .worker_tx
-                        .send(WorkerCommand::TelegramMessage(chat_id, msg.clone()))
-                        .await
-                    {
-                        error!("failed to send message, reason: {}", e);
-                    }
-                }
-
-                if let Some(user_key) = admin.pushover_user_key.clone() {
-                    if let Err(e) = self
-                        .worker_tx
-                        .send(WorkerCommand::PushoverMessage {
-                            user_key,
-                            title: None,
-                            body: msg.clone(),
-                        })
-                        .await
-                    {
-                        error!("failed to send PushoverMessage, reason: {}", e);
-                    }
-                }
+            #[cfg(feature = "desktop")]
+            if let Err(e) = self
+                .notifier
+                .send_desktop_notification(Some("Update Available".to_string()), &message)
+            {
+                error!("failed to send notification, reason {}", e);
             }
         } else {
             info!("no tanoshi update found");
@@ -313,6 +268,12 @@ impl UpdatesWorker {
                     }
 
                     info!("periodic updates done in {:?}", Instant::now() - start);
+
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        malloc_trim(0);
+                        debug!("ran malloc trim")
+                    }
                 }
                 _ = server_update_interval.tick() => {
                     info!("check server update");
@@ -334,12 +295,12 @@ impl UpdatesWorker {
 
 pub fn start(
     period: u64,
-    userdb: UserDatabase,
     mangadb: MangaDatabase,
-    extensions: ExtensionBus,
-    worker_tx: Sender<WorkerCommand>,
+    extensions: SourceBus,
+    download_tx: DownloadSender,
+    notifier: Notifier,
 ) -> JoinHandle<()> {
-    let worker = UpdatesWorker::new(period, userdb, mangadb, extensions, worker_tx);
+    let worker = UpdatesWorker::new(period, mangadb, extensions, download_tx, notifier);
 
     tokio::spawn(async move {
         worker.run().await;

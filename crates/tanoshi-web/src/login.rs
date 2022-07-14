@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use dominator::{clone, html, Dom};
+use dominator::{clone, html, Dom, EventOptions};
 use dominator::{routing, with_node};
 use futures_signals::signal::Mutable;
 use futures_signals::signal::SignalExt;
@@ -35,7 +35,7 @@ impl Login {
             match query::user_login(username, password).await {
                 Ok(token) => {
                     local_storage().set("token", &token).unwrap_throw();
-                    routing::go_to_url(&Route::Library.url());
+                    routing::go_to_url(&Route::LibraryList.url());
                 }
                 Err(e) => {
                     snackbar::show(format!("Login failed: {}", e));
@@ -69,6 +69,7 @@ impl Login {
 
     pub fn render_main(login: Rc<Self>, app: Rc<App>) -> Dom {
         html!("div", {
+            .class("content")
             .style("display", "flex")
             .style("flex-direction", "column")
             .style("max-width", "1024px")
@@ -105,7 +106,7 @@ impl Login {
                 html!("form", {
                     .style("display", "flex")
                     .style("flex-direction", "column")
-                    .event_preventable(|e: events::KeyDown| {
+                    .event_with_options(&EventOptions::preventable(), |e: events::KeyDown| {
                         if e.key() == "enter" {
                             e.prevent_default();
                         }
@@ -139,7 +140,7 @@ impl Login {
                                     if x.activated {
                                         Some(html!("button", {
                                             .text("Login")
-                                            .event_preventable(clone!(login => move |e: events::Click| {
+                                            .event_with_options(&EventOptions::preventable(), clone!(login => move |e: events::Click| {
                                                 e.prevent_default();
                                                 Self::login(login.clone());
                                             }))
@@ -147,7 +148,7 @@ impl Login {
                                     } else {
                                         Some(html!("button", {
                                             .text("Create Account")
-                                            .event_preventable(clone!(login, app => move |e: events::Click| {
+                                            .event_with_options(&EventOptions::preventable(), clone!(login, app => move |e: events::Click| {
                                                 e.prevent_default();
                                                 Self::register(login.clone(), app.clone());
                                             }))
@@ -166,9 +167,7 @@ impl Login {
 
     pub fn render(login: Rc<Self>, app: Rc<App>) -> Dom {
         html!("div", {
-            .class([
-                "main",
-            ])
+            .class("main")
             .children(&mut [
                 Self::render_topbar(login.clone()),
                 html!("div", {

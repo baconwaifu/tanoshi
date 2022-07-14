@@ -1,14 +1,15 @@
 use std::rc::Rc;
 
-use dominator::with_node;
-use dominator::{clone, html, Dom};
+use dominator::{clone, html, routing, Dom};
+use dominator::{with_node, EventOptions};
 use futures_signals::signal::Mutable;
 use futures_signals::signal::SignalExt;
+use wasm_bindgen::UnwrapThrowExt;
 use web_sys::HtmlInputElement;
 
-use crate::common::{events, snackbar};
+use crate::common::{events, snackbar, Route};
 use crate::query;
-use crate::utils::AsyncLoader;
+use crate::utils::{is_tauri_signal, local_storage, AsyncLoader};
 
 pub struct Profile {
     old_password: Mutable<String>,
@@ -16,6 +17,7 @@ pub struct Profile {
     confirm_password: Mutable<String>,
     telegram_chat_id: Mutable<Option<String>>,
     pushover_user_key: Mutable<Option<String>>,
+    myanimelist_status: Mutable<bool>,
     pub loader: AsyncLoader,
 }
 
@@ -27,6 +29,7 @@ impl Profile {
             confirm_password: Mutable::new("".to_string()),
             telegram_chat_id: Mutable::new(None),
             pushover_user_key: Mutable::new(None),
+            myanimelist_status: Mutable::new(false),
             loader: AsyncLoader::new(),
         })
     }
@@ -37,6 +40,7 @@ impl Profile {
                 Ok(result) => {
                     profile.telegram_chat_id.set(result.telegram_chat_id.map(|id| id.to_string()));
                     profile.pushover_user_key.set(result.pushover_user_key);
+                    profile.myanimelist_status.set(result.myanimelist_status)
                 },
                 Err(err) => {
                     snackbar::show(format!("{}", err));
@@ -73,6 +77,28 @@ impl Profile {
                 }
             });
         }
+    }
+
+    fn test_dekstop_notification(profile: Rc<Self>) {
+        profile.loader.load(async move {
+            match query::test_desktop_notification().await {
+                Ok(_) => {}
+                Err(err) => {
+                    snackbar::show(format!("{}", err));
+                }
+            }
+        });
+    }
+
+    fn myanimelist_logout(profile: Rc<Self>) {
+        profile.loader.load(clone!(profile => async move {
+            match query::myanimelist_logout().await {
+                Ok(_) => Self::fetch_me(profile),
+                Err(err) => {
+                    snackbar::show(format!("{}", err));
+                }
+            }
+        }))
     }
 
     fn change_password(profile: Rc<Self>) {
@@ -112,10 +138,14 @@ impl Profile {
             .style("max-width", "1024px")
             .style("margin-left", "auto")
             .style("margin-right", "auto")
+            .style("margin-bottom", "0.5rem")
+            .style("padding", "0.5rem")
             .style("border-radius", "0.5rem")
+            .style("border", "var(--list-group-border)")
             .children(&mut [
                 html!("span", {
-                    .style("margin-left", "0.5rem")
+                    .style("margin-left", "0.25rem")
+                    .style("margin-bottom", "0.5rem")
                     .text("Change Password")
                 }),
                 html!("input" => HtmlInputElement, {
@@ -168,7 +198,7 @@ impl Profile {
                 html!("div", {
                     .style("display", "flex")
                     .style("justify-content", "flex-end")
-                    .style("margin", "0.5rem")
+                    .style("margin-top", "0.5rem")
                     .children(&mut [
                         html!("input", {
                             .attribute("type", "submit")
@@ -180,7 +210,7 @@ impl Profile {
                                 }
                             })))
                             .text("Submit")
-                            .event_preventable(clone!(profile => move |e: events::Click| {
+                            .event_with_options(&EventOptions::preventable(), clone!(profile => move |e: events::Click| {
                                 e.prevent_default();
                                 Self::change_password(profile.clone());
                             }))
@@ -192,68 +222,85 @@ impl Profile {
     }
 
     pub fn render_notification_setting(profile: Rc<Self>) -> Dom {
-        Self::fetch_me(profile.clone());
-
         html!("form", {
+            .class("content")
             .style("display", "flex")
             .style("flex-direction", "column")
             .style("max-width", "1024px")
             .style("margin-left", "auto")
             .style("margin-right", "auto")
+            .style("margin-bottom", "0.5rem")
+            .style("padding", "0.5rem")
             .style("border-radius", "0.5rem")
+            .style("border", "var(--list-group-border)")
             .children(&mut [
                 html!("span", {
-                    .style("margin-left", "0.5rem")
+                    .style("margin-left", "0.25rem")
+                    .style("margin-bottom", "0.5rem")
                     .text("Notification")
-                }),
-                html!("input" => HtmlInputElement, {
-                    .attribute("type", "text")
-                    .attribute("placeholder", "Telegram chat id, get from telegram bot")
-                    .property_signal("value", profile.telegram_chat_id.signal_cloned().map(|id| id.unwrap_or_else(|| "".to_string())))
-                    .with_node!(input => {
-                        .event(clone!(profile => move |_: events::Input| {
-                            profile.telegram_chat_id.set(Some(input.value()));
-                        }))
-                    })
                 }),
                 html!("div", {
                     .style("display", "flex")
                     .style("justify-content", "flex-end")
                     .style("margin-right", "0.5rem")
                     .style("margin-top", "0.5rem")
+                    .visible_signal(is_tauri_signal())
                     .children(&mut [
+                        html!("input", {
+                            .attribute("type", "button")
+                            .attribute("value", "Test Desktop Notification")
+                            .text("Test Desktop Notification")
+                            .event_with_options(&EventOptions::preventable(), clone!(profile => move |e: events::Click| {
+                                e.prevent_default();
+                                Self::test_dekstop_notification(profile.clone());
+                            }))
+                        }),
+                    ])
+                }),
+                html!("div", {
+                    .style("display", "flex")
+                    .children(&mut [
+                        html!("input" => HtmlInputElement, {
+                            .style("width", "100%")
+                            .attribute("type", "text")
+                            .attribute("placeholder", "Telegram chat id, get from telegram bot")
+                            .property_signal("value", profile.telegram_chat_id.signal_cloned().map(|id| id.unwrap_or_else(|| "".to_string())))
+                            .with_node!(input => {
+                                .event(clone!(profile => move |_: events::Input| {
+                                    profile.telegram_chat_id.set(Some(input.value()));
+                                }))
+                            })
+                        }),
                         html!("input", {
                             .attribute("type", "button")
                             .attribute("value", "Test")
                             .text("Test Telegram")
-                            .event_preventable(clone!(profile => move |e: events::Click| {
+                            .event_with_options(&EventOptions::preventable(), clone!(profile => move |e: events::Click| {
                                 e.prevent_default();
                                 Self::test_telegram(profile.clone());
                             }))
                         }),
                     ])
                 }),
-                html!("input" => HtmlInputElement, {
-                    .attribute("type", "text")
-                    .attribute("placeholder", "Pushover user key, get from pushover dashboard")
-                    .property_signal("value", profile.pushover_user_key.signal_cloned().map(|id| id.unwrap_or_else(|| "".to_string())))
-                    .with_node!(input => {
-                        .event(clone!(profile => move |_: events::Input| {
-                            profile.pushover_user_key.set(Some(input.value()));
-                        }))
-                    })
-                }),
                 html!("div", {
                     .style("display", "flex")
-                    .style("justify-content", "flex-end")
-                    .style("margin-right", "0.5rem")
-                    .style("margin-top", "0.5rem")
                     .children(&mut [
+                        html!("input" => HtmlInputElement, {
+                            .style("width", "100%")
+                            .attribute("type", "text")
+                            .attribute("placeholder", "Pushover user key, get from pushover dashboard")
+                            .property_signal("value", profile.pushover_user_key.signal_cloned().map(|id| id.unwrap_or_else(|| "".to_string())))
+                            .with_node!(input => {
+                                .event(clone!(profile => move |_: events::Input| {
+                                    profile.pushover_user_key.set(Some(input.value()));
+                                }))
+                            })
+                        }),
                         html!("input", {
                             .attribute("type", "button")
                             .attribute("value", "Test")
                             .text("Test Pushover")
-                            .event_preventable(clone!(profile => move |e: events::Click| {
+                            .event_with_options(&EventOptions::preventable(), clone!(profile => move |e: events::Click| {
                                 e.prevent_default();
                                 Self::test_pushover(profile.clone());
                             }))
@@ -263,28 +310,108 @@ impl Profile {
                 html!("div", {
                     .style("display", "flex")
                     .style("justify-content", "flex-end")
-                    .style("margin-right", "0.5rem")
                     .style("margin-top", "0.5rem")
                     .children(&mut [
                         html!("input", {
                             .attribute("type", "submit")
                             .text("Submit")
-                            .event_preventable(clone!(profile => move |e: events::Click| {
+                            .event_with_options(&EventOptions::preventable(), clone!(profile => move |e: events::Click| {
                                 e.prevent_default();
                                 Self::update_profile(profile.clone());
                             }))
                         })
                     ])
+                })
+            ])
+        })
+    }
+
+    fn render_tracker_setting(profile: Rc<Self>) -> Dom {
+        html!("div", {
+            .class("content")
+            .style("display", "flex")
+            .style("flex-direction", "column")
+            .style("max-width", "1024px")
+            .style("margin-left", "auto")
+            .style("margin-right", "auto")
+            .style("padding", "0.75rem")
+            .style("margin-bottom", "0.5rem")
+            .style("border-radius", "0.5rem")
+            .style("border", "var(--list-group-border)")
+            .children(&mut [
+                html!("span", {
+                    .style("margin-bottom", "0.5rem")
+                    .text("Tracker")
+                }),
+                html!("div", {
+                    .style("display", "flex")
+                    .children(&mut [
+                        html!("div", {
+                            .style("display", "flex")
+                            .style("align-items", "center")
+                            .style("width", "100%")
+                            .children(&mut [
+                                html!("img", {
+                                    .style("height", "20px")
+                                    .style("width", "20px")
+                                    .style("margin-right", "0.5rem")
+                                    .attribute("src", "https://myanimelist.net/img/common/pwa/launcher-icon-0-75x.png")
+                                }),
+                                html!("span", {
+                                    .text("MyAnimeList")
+                                })
+                            ])
+                        }),
+                    ])
+                    .child_signal(profile.myanimelist_status.signal_cloned().map(clone!(profile => move |status| if status {
+                        Some(html!("button", {
+                            .style("color", "red")
+                            .text("Logout")
+                            .event_with_options(&EventOptions::preventable(), clone!(profile => move |e: events::Click| {
+                                e.prevent_default();
+                                Self::myanimelist_logout(profile.clone());
+                            }))
+                        }))
+                    } else {
+                        Some(html!("a", {
+                            .class("button")
+                            .attribute("href", &Route::TrackerLogin("myanimelist".to_string()).url())
+                            .attribute("target", "_blank")
+                            .text("Login")
+                        }))
+                    })))
                 }),
             ])
         })
     }
 
     pub fn render(profile: Rc<Self>) -> Dom {
+        Self::fetch_me(profile.clone());
+
         html!("div", {
             .children(&mut [
                 Self::render_change_password(profile.clone()),
-                Self::render_notification_setting(profile),
+                Self::render_notification_setting(profile.clone()),
+                Self::render_tracker_setting(profile),
+                html!("div", {
+                    .style("max-width", "1024px")
+                    .style("margin-left", "auto")
+                    .style("margin-right", "auto")
+                    .children(&mut [
+                        html!("button", {
+                            .class("uninstall-btn")
+                            .children(&mut [
+                                html!("span", {
+                                    .text("Logout")
+                                    .event(|_: events::Click| {
+                                        local_storage().delete("token").unwrap_throw();
+                                        routing::go_to_url("/login");
+                                    })
+                                })
+                            ])
+                        })
+                    ])
+                })
             ])
         })
     }

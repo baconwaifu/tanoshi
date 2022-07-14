@@ -5,6 +5,118 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- [tanoshi] MyAnimeList tracking
+- [tanoshi] logger extension for graphql server
+
+## Changes
+- [tanoshi] chapter update worker will revert to insert all chapter and replace on conflict, but still only notify new chapter
+
+## [0.27.1]
+### Added
+- [tanoshi] add link to chapter on chapter update notification if `BASE_URL` is set
+  
+### Changed
+- [tanoshi] clean download file name is now done regardless of OS
+- [tanoshi-web] increas preload by 1 on continous reader
+  
+### Fixed
+- [tanoshi-web] filter input checkbox state not changed
+
+## [0.27.0]
+### Changed
+- [tanoshi] extension is back using dynamic library instead of webassembly or javascript
+
+## [0.26.1]
+### Changed
+- [tanoshi-vm] add timeout to async operations
+
+## [0.26.0]
+### Added
+- [tanoshi] source filter and settings
+- [tanoshi] multiple folder for local sources
+  ```yaml
+  # single local source
+  local_path: .\manga
+  # multiple local sources
+  local_path:
+    - name: Local
+      path: .\manga
+    - name: Public
+      path: .\test\data\manga
+  ```
+
+### Changed
+- [tanoshi] extension now using and ported to javascript
+- [tanoshi] pages no longer cached to database
+- [tanoshi] downloaded manga path moved to table chapter
+- [tanoshi-web] on continous reader, scrolled to bottom automatically marked as last page
+
+## [0.25.22]
+
+### Added
+- [tanoshi] library categories
+- [tanoshi] link field in manga
+- [tanoshi-web] external link button in manga detail
+- [tanoshi-web] add logout button
+- [tanoshi-web] page slider
+- [tanoshi-web] changelog, github, website and discord link on settings page
+- [tanoshi] image proxy has referer query
+- [tanoshi] image proxy now forward every header to upstream
+
+### Changed
+- [tanoshi-desktop] topbar is now white
+- [tanoshi-desktop] slight layout changes
+- [tanoshi-web] updates chapter number now sorted descending
+- [tanoshi-web] manga detail on dual column layout now scrollable
+- [tanoshi-web] redesign action button in manga detail page
+- [tanoshi-web] zoom button moved to bottom bar
+- [tanoshi-web] page slider direction follow reader direction
+- [tanoshi-web] reorganize `more` page
+- [tanoshi-vm] remove async from extension thread
+- [tanoshi-vm] add non async function to extension bus
+
+### Removed
+- [tanoshi-web] manage downloads page
+
+## [0.25.21]
+
+### Added
+- Download chapters from external sources
+- Add details to local manga with `details.json` inside series folder. All values are optional
+  ```
+  {
+    "title": "An Interesting Manga",
+    "author: ["Author 1", "Author 2"],
+    "genre: ": ["Romance", "Action"],
+    "status": "Ongoing",
+    "description": "This manga is so interesting",
+    "cover_path": "relative/path/from/root/series/folder/to/thumbail.jpg",
+  }
+  ```
+- Automatically download new chapters on update. Enable with set `auto_download_chapters: true` on `config.yml`
+- Desktop version built with tauri if you don't plan to host it
+
+### Changes
+- Few icon changes
+- Desktop layout
+- Performance improvement for library and manga details page
+- Opening first page will update history
+- Zoom button move to bottom right in vertical
+- Hide bottombar inside settings page
+- Topbar and bottombar autohide on reader, tap image or middle screen to bring back
+
+## [0.25.20]
+### Added
+- Zoom in and zoom out button in reader
+
+### Changed
+- Replace some text button with icon button
+- Auto close snackbar 
+- animate.css now bundled
+- Reader background color set for body instead of reader element
+
 ## [0.25.19]
 
 ### Added
@@ -293,7 +405,13 @@ Nothing changes, this release to build for multiarch docker image
 
 - fix panic when using local source
 
-[Unreleased]: https://github.com/faldez/tanoshi/compare/v0.25.19...HEAD
+[0.27.1]: https://github.com/faldez/tanoshi/compare/v0.27.0...v0.27.1
+[0.27.0]: https://github.com/faldez/tanoshi/compare/v0.26.1...v0.27.0
+[0.26.1]: https://github.com/faldez/tanoshi/compare/v0.26.0...v0.26.1
+[0.26.0]: https://github.com/faldez/tanoshi/compare/v0.25.22...v0.26.0
+[0.25.22]: https://github.com/faldez/tanoshi/compare/v0.25.21...v0.25.22
+[0.25.21]: https://github.com/faldez/tanoshi/compare/v0.25.20...v0.25.21
+[0.25.20]: https://github.com/faldez/tanoshi/compare/v0.25.19...v0.25.20
 [0.25.19]: https://github.com/faldez/tanoshi/compare/v0.25.18...v0.25.19
 [0.25.18]: https://github.com/faldez/tanoshi/compare/v0.25.17...v0.25.18
 [0.25.17]: https://github.com/faldez/tanoshi/compare/v0.25.16...v0.25.17

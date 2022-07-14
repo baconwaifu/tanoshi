@@ -6,12 +6,16 @@ use futures_signals::signal::{Mutable, SignalExt};
 use wasm_bindgen::UnwrapThrowExt;
 
 use crate::catalogue::Catalogue;
-use crate::common::{snackbar, ServerStatus};
+use crate::catalogue_list::CatalogueList;
+use crate::common::{snackbar, LibrarySettings, ServerStatus, SettingCategory};
 use crate::library::Library;
+use crate::library_list::LibraryList;
 use crate::login::Login;
 use crate::manga::Manga;
 use crate::query;
 use crate::reader::Reader;
+use crate::tracker_login::TrackerLogin;
+use crate::tracker_redirect::TrackerRedirect;
 use crate::utils::local_storage;
 use crate::{
     common::{Bottombar, Route, Spinner},
@@ -88,14 +92,29 @@ impl App {
             })))
             .child_signal(Route::signal().map(clone!(app => move |x| {
                 match x {
+                    Route::Root => {
+                        if let Some(default_category) = LibrarySettings::load(false, false).default_category.get_cloned() {
+                            routing::go_to_url(&Route::Library(default_category.id).url());
+                        } else {
+                            routing::go_to_url(&Route::LibraryList.url());
+                        }
+
+                        None
+                    }
                     Route::Login => Some(
                         Login::render(Login::new(), app.clone())
                     ),
-                    Route::Library => Some(
-                        Library::render(Library::new()),
+                    Route::LibraryList => {
+                        Some(LibraryList::render(LibraryList::new()))
+                    }
+                    Route::Library(category_id) => Some(
+                        Library::render(Library::new(category_id)),
                     ),
-                    Route::Catalogue{id, latest} => Some(
-                        Catalogue::render(Catalogue::new(), id, latest),
+                    Route::CatalogueList => Some(
+                        CatalogueList::render(CatalogueList::new()),
+                    ),
+                    Route::Catalogue{id, latest, query} => Some(
+                        Catalogue::render(Catalogue::new(id), latest, query),
                     ),
                     Route::Manga(manga_id) => Some(
                         Manga::render(Manga::new(manga_id, 0, "".to_string())),
@@ -112,9 +131,16 @@ impl App {
                     Route::Histories => Some(
                         Histories::render(Histories::new(), app.clone()),
                     ),
-                    Route::Settings(category) => Some(
-                        Settings::render(Settings::new(app.server_status.get_cloned().map(|status| status.version).unwrap_or_else(|| "0.0.0".to_string())), category),
-                    ),
+                    Route::Settings(category) => {
+                        let server_version = app.server_status.get_cloned().unwrap_or_default().version;
+                        Some(Settings::new(server_version, category).render())
+                    }
+                    Route::TrackerLogin(tracker) => {
+                        Some(TrackerLogin::render(TrackerLogin::new(tracker.to_owned())))
+                    }
+                    Route::TrackerRedirect{tracker, code, state} => {
+                        Some(TrackerRedirect::render(TrackerRedirect::new(tracker.to_owned(), code.to_owned(), state.to_owned())))
+                    }
                     Route::NotFound => Some(
                         html!("div", {
                             .text("not found")
@@ -124,8 +150,7 @@ impl App {
             })))
             .child_signal(Route::signal().map(|x| {
                 match x {
-                    Route::Login | Route::Manga(_) | Route::MangaBySourcePath(_, _) | Route::Chapter(_, _) => None,
-                    _ => Some(html!("div", {
+                    Route::LibraryList | Route::Library(_) | Route::CatalogueList | Route::Updates | Route::Histories | Route::Settings(SettingCategory::None) => Some(html!("div", {
                         .children(&mut [
                             html!("div", {
                                 .class("bottombar-spacing")
@@ -133,6 +158,7 @@ impl App {
                             Bottombar::render(),
                         ])
                     })),
+                    _ => None,
                 }
             }))
             .children(&mut [

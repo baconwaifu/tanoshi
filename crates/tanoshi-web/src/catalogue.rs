@@ -1,54 +1,58 @@
 use std::rc::Rc;
 
-use dominator::{Dom, clone, events, html, link, routing, with_node};
-use futures_signals::map_ref;
+use crate::{
+    common::{snackbar, Cover, InputList, Spinner},
+    query,
+    utils::{history, local_storage, window, AsyncLoader},
+};
+use dominator::{clone, events, html, routing, svg, with_node, Dom, EventOptions};
 use futures_signals::signal::{Mutable, SignalExt};
-use futures_signals::signal_map::MutableBTreeMap;
-use futures_signals::signal_vec::{self, MutableVec, SignalVecExt};
-use wasm_bindgen::prelude::*;
+use futures_signals::signal_vec::{MutableVec, SignalVecExt};
 use serde::{Deserialize, Serialize};
+use wasm_bindgen::{JsValue, UnwrapThrowExt};
 use web_sys::HtmlInputElement;
-use crate::{
-    common::{Route, snackbar},
-    query::{
-        self,
-        browse_source::{SortByParam, SortOrderParam},
-    },
-    utils::local_storage,
-};
-use crate::{
-    common::{Cover, Spinner},
-    utils::AsyncLoader,
-};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-struct Source {
-    id: i64,
-    name: String,
-    version: String,
-    icon: String,
-    need_login: bool,
-}
+pub const STORAGE_KEY: &str = "catalogue";
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-struct SourceManga {
-    name: String,
-    covers: Vec<Cover>,
+macro_rules! map_data_to_cover {
+    ($data:ident, $catalogue:ident, $field:tt) => {
+        let covers = $data
+            .$field
+            .iter()
+            .map(|item| {
+                Cover::new(
+                    item.id,
+                    $catalogue.source_id,
+                    item.path.clone(),
+                    item.title.clone(),
+                    item.cover_url.clone(),
+                    item.is_favorite,
+                    None,
+                    0,
+                )
+            })
+            .collect();
+        let mut cover_list = $catalogue.cover_list.lock_mut();
+        if $catalogue.page.get() == 1 {
+            cover_list.replace_cloned(covers);
+        } else if $catalogue.page.get() > 0 {
+            cover_list.extend(covers);
+        }
+    };
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(default)]
 pub struct Catalogue {
-    pub source_id: Mutable<i64>,
-    keyword: Mutable<String>,
+    source_id: i64,
+    source_name: Mutable<String>,
+    keyword: Mutable<Option<String>>,
+    latest: Mutable<bool>,
     page: Mutable<i64>,
-    sort_by: Mutable<SortByParam>,
-    sort_order: Mutable<SortOrderParam>,
     is_search: Mutable<bool>,
+    is_filter: Mutable<bool>,
     cover_list: MutableVec<Cover>,
-    cover_list_map: MutableBTreeMap<i64, SourceManga>,
-    #[serde(skip)]
-    sources: MutableVec<Source>,
+    input_list_modal: Rc<InputList>,
     #[serde(skip)]
     loader: AsyncLoader,
     #[serde(skip)]
@@ -58,131 +62,174 @@ pub struct Catalogue {
 impl Default for Catalogue {
     fn default() -> Self {
         Self {
-            source_id: Mutable::new(0),
-            keyword: Mutable::new("".to_string()),
+            source_id: 0,
+            source_name: Mutable::new("Catalogue".to_string()),
+            keyword: Mutable::new(None),
+            latest: Mutable::new(false),
             page: Mutable::new(1),
-            sort_by: Mutable::new(SortByParam::VIEWS),
-            sort_order: Mutable::new(SortOrderParam::DESC),
             is_search: Mutable::new(false),
+            is_filter: Mutable::new(false),
             cover_list: MutableVec::new(),
-            cover_list_map: MutableBTreeMap::new(),
+            input_list_modal: Rc::new(InputList::new(true)),
             spinner: Spinner::new(),
-            sources: MutableVec::new(),
             loader: AsyncLoader::new(),
         }
     }
 }
 
 impl Catalogue {
-    pub fn new() -> Rc<Self> {
+    pub fn new(source_id: i64) -> Rc<Self> {
         let catalogue = local_storage()
-            .get("catalogue")
+            .get(STORAGE_KEY)
             .unwrap_throw()
             .and_then(|object_str| serde_json::from_str(&object_str).ok())
-            .unwrap_or_default();
-        
+            .unwrap_or_else(|| Self {
+                source_id,
+                ..Default::default()
+            });
+
         Rc::new(catalogue)
-    }
-
-    pub fn reset(&self) {
-        local_storage().delete("catalogue").unwrap_throw();
-
-        self.source_id.set(0);
-        self.keyword.set("".to_string());
-        self.page.set(1);
-        self.sort_by.set(SortByParam::VIEWS);
-        self.sort_order.set(SortOrderParam::DESC);
-        self.is_search.set(false);
-        self.cover_list.lock_mut().clear();
-        self.sources.lock_mut().clear();
     }
 
     pub fn serialize_into_json(&self) -> String {
         serde_json::to_string(self).unwrap_throw()
     }
 
-    pub fn fetch_manga_from_all_sources(catalogue: Rc<Self>) {
-        let sources: Vec<Source> = catalogue.sources.lock_ref().iter().cloned().collect();
-        let keyword = catalogue.keyword.get_cloned();
-        catalogue.loader.load(clone!(catalogue => async move {
-            for source in sources {
-                match query::fetch_manga_from_source(source.id, 1, Some(keyword.clone()), SortByParam::VIEWS, SortOrderParam::DESC).await {
-                    Ok(covers) => {
-                        let mut cover_list = catalogue.cover_list_map.lock_mut();
-                        cover_list.insert_cloned(source.id, SourceManga { name: source.name.clone(), covers } );
-                    }
-                    Err(e) => {
-                        snackbar::show(format!("Fetch manga from source failed: {}", e))
-                    }
-                }
-
-                let state = catalogue.serialize_into_json();
-                local_storage().set("catalogue", state.as_str()).unwrap_throw();
-            }
-        }));
-    }
-
-    pub fn fetch_mangas(catalogue: Rc<Self>) {
+    pub fn fetch_source_filters(catalogue: Rc<Self>) {
         catalogue.spinner.set_active(true);
         catalogue.loader.load(clone!(catalogue => async move {
-            match query::fetch_manga_from_source(*catalogue.source_id.lock_ref(), catalogue.page.get(), Some(catalogue.keyword.get_cloned()), catalogue.sort_by.get_cloned(), catalogue.sort_order.get_cloned()).await {
-                Ok(covers) => {
-                    let mut cover_list = catalogue.cover_list.lock_mut();
-                    if catalogue.page.get() == 1 {
-                        cover_list.replace_cloned(covers);
-                    } else if catalogue.page.get() > 0 {
-                        cover_list.extend(covers);
-                    }
-
+            match query::fetch_source_filters(catalogue.source_id).await {
+                Ok(data) => {
+                    catalogue.input_list_modal.set(data.source.filters);
                 }
                 Err(e) => {
                     snackbar::show(format!("Fetch manga from source failed: {}", e))
                 }
             }
-            
+            catalogue.spinner.set_active(false);
+        }))
+    }
+
+    pub fn fetch_mangas(catalogue: Rc<Self>) {
+        catalogue.replace_state_with_url();
+        catalogue.spinner.set_active(true);
+        catalogue.loader.load(clone!(catalogue => async move {
+            if let Some(keyword) = catalogue.keyword.get_cloned() {
+                match query::fetch_manga_from_source(catalogue.source_id, catalogue.page.get(), Some(keyword), None).await {
+                    Ok(data) => {
+                        catalogue.source_name.set(data.source.name);
+                        map_data_to_cover!(data, catalogue, browse_source);
+                    }
+                    Err(e) => {
+                        snackbar::show(format!("Fetch manga from source failed: {}", e))
+                    }
+                }
+            } else if catalogue.is_filter.get() {
+                match query::fetch_manga_from_source(catalogue.source_id, catalogue.page.get(), None, Some(catalogue.input_list_modal.input_list.lock_ref().to_vec())).await {
+                    Ok(data) => {
+                        catalogue.source_name.set(data.source.name.clone());
+                        map_data_to_cover!(data, catalogue, browse_source);
+                    }
+                    Err(e) => {
+                        snackbar::show(format!("Fetch manga from source failed: {}", e))
+                    }
+                }
+            } else if catalogue.latest.get() {
+                match query::get_latest_manga(catalogue.source_id, catalogue.page.get()).await {
+                    Ok(data) => {
+                        catalogue.source_name.set(data.source.name.clone());
+                        map_data_to_cover!(data, catalogue, get_latest_manga);
+                    }
+                    Err(e) => {
+                        snackbar::show(format!("Fetch manga from source failed: {}", e))
+                    }
+                }
+            } else {
+                match query::get_popular_manga(catalogue.source_id, catalogue.page.get()).await {
+                    Ok(data) => {
+                        catalogue.source_name.set(data.source.name.clone());
+                        map_data_to_cover!(data, catalogue, get_popular_manga);
+                    }
+                    Err(e) => {
+                        snackbar::show(format!("Fetch manga from source failed: {}", e))
+                    }
+                }
+            }
+
             let state =  catalogue.serialize_into_json();
-            local_storage().set("catalogue", state.as_str()).unwrap_throw();
+            local_storage().set(STORAGE_KEY, state.as_str()).unwrap_throw();
             catalogue.spinner.set_active(false);
         }));
     }
 
-    pub fn fetch_sources(catalogue: Rc<Self>) {
-        catalogue.loader.load(clone!(catalogue => async move {
-            match query::fetch_sources().await {
-                Ok(result) => {
-                    let sources: Vec<Source> = result.iter().map(|s| Source {
-                        id: s.id,
-                        name: s.name.clone(),
-                        version: s.version.clone(),
-                        icon: s.icon.clone(),
-                        need_login: s.need_login,
-                    }).collect();
+    fn replace_state_with_url(&self) {
+        let url = if self.latest.get() {
+            format!("/catalogue/{}/latest", self.source_id,)
+        } else {
+            let mut param = vec![];
 
-                    let mut cover_list_map = catalogue.cover_list_map.lock_mut();
-                    for source in sources.iter() {
-                        cover_list_map.insert_cloned(source.id, SourceManga{name: source.name.clone(), covers: vec![]});
-                    }
+            if let Some(query) = self.keyword.get_cloned() {
+                param.push(format!("query={}", query));
+            };
 
-                    catalogue.sources.lock_mut().replace_cloned(sources);
-                },
-                Err(err) => {
-                    snackbar::show(format!("{}", err));
-                }
+            // if let Ok(filters) = serde_json::to_string(&self.input_list_modal.input_list) {
+            //     param.push(format!("filters={}", filters));
+            // };
+
+            if param.is_empty() {
+                format!("/catalogue/{}", self.source_id,)
+            } else {
+                format!("/catalogue/{}?{}", self.source_id, param.join("&"))
             }
-        }));
+        };
+
+        if let Err(e) = history().replace_state_with_url(&JsValue::null(), "", Some(&url)) {
+            let message = if let Some(msg) = e.as_string() {
+                msg
+            } else {
+                "unknown reason".to_string()
+            };
+
+            error!("error replace_state_with_url: {}", message);
+        }
     }
 
     pub fn render_topbar(catalogue: Rc<Self>) -> Dom {
         html!("div", {
             .class("topbar")
             .child_signal(catalogue.is_search.signal().map(|is_search| {
-                if is_search {
-                    None
-                } else {
-                    Some(html!("button", {
-                        .text("Filter")
-                    }))
-                }
+                (!is_search).then(|| html!("button", {
+                    .style("display", "flex")
+                    .style("align-items", "center")
+                    .event(|_: events::Click| {
+                        let history = window().history().unwrap();
+                        if history.length().unwrap() > 1 {
+                            let _ = history.back();
+                        } else {
+                            routing::go_to_url("/");
+                        }
+                    })
+                    .children(&mut [
+                        svg!("svg", {
+                            .attribute("xmlns", "http://www.w3.org/2000/svg")
+                            .attribute("fill", "none")
+                            .attribute("viewBox", "0 0 24 24")
+                            .attribute("stroke", "currentColor")
+                            .class("icon")
+                            .children(&mut [
+                                svg!("path", {
+                                    .attribute("stroke-linecap", "round")
+                                    .attribute("stroke-linejoin", "round")
+                                    .attribute("stroke-width", "2")
+                                    .attribute("d", "M15 19l-7-7 7-7")
+                                })
+                            ])
+                        }),
+                        html!("span", {
+                            .text("Sources")
+                        })
+                    ])
+                }))
             }))
             .child_signal(catalogue.is_search.signal().map(clone!(catalogue => move |is_search| {
                 if is_search {
@@ -190,18 +237,15 @@ impl Catalogue {
                         .style("width", "100%")
                         .attribute("placeholder", "Search")
                         .attribute("type", "text")
+                        .attribute("value", &catalogue.keyword.get_cloned().unwrap_or_else(|| "".to_string()))
                         .with_node!(input => {
-                            .event(clone!(catalogue => move |_: events::Input| {
-                                catalogue.keyword.set_neq(input.value());
-                            }))
-                            .event_preventable(clone!(catalogue => move |event: events::KeyDown| {
-                                if event.key() == "Enter" {
-                                    event.prevent_default();
+                            .event_with_options(&EventOptions::preventable(), clone!(catalogue => move |e: events::KeyDown| {
+                                if e.key() == "Enter" {
+                                    e.prevent_default();
                                     catalogue.cover_list.lock_mut().clear();
                                     catalogue.page.set_neq(1);
-                                    if catalogue.source_id.get_cloned() == 0 {
-                                        Self::fetch_manga_from_all_sources(catalogue.clone());
-                                    } else {
+                                    if !input.value().is_empty() {
+                                        catalogue.keyword.set_neq(Some(input.value()));
                                         Self::fetch_mangas(catalogue.clone());
                                     }
                                 }
@@ -210,97 +254,101 @@ impl Catalogue {
                     }))
                 } else {
                     Some(html!("span", {
-                        .text("Catalogue")
+                        .text_signal(catalogue.source_name.signal_cloned())
                     }))
                 }
             })))
             .child_signal(catalogue.is_search.signal().map(clone!(catalogue => move |is_search| {
                 if is_search {
                     Some(html!("button", {
-                        .text("Cancel")
+                        .attribute("id", "cancel")
                         .event(clone!(catalogue => move |_: events::Click| {
                             catalogue.is_search.set_neq(false);
-                            if catalogue.keyword.get_cloned() != "" {
-                                catalogue.keyword.set_neq("".to_string());
-                                catalogue.cover_list.lock_mut().clear();
-                                catalogue.page.set_neq(1);
-                                if catalogue.source_id.get_cloned() > 0 {
-                                    Self::fetch_mangas(catalogue.clone()); 
-                                }
-                            }
-
-                            if catalogue.source_id.get() == 0 {
-                                local_storage().delete("catalogue").unwrap_throw();
-                                Self::fetch_sources(catalogue.clone());
-                            }
-                        }))
-                    }))
-                } else {
-                    Some(html!("button", {
-                        .text("Search")
-                        .event(clone!(catalogue => move |_: events::Click| {
-                            catalogue.is_search.set_neq(true);
-                        }))
-                    }))
-                }
-            })))
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn render_search(catalogue: Rc<Self>) -> Dom {
-        html!("div", {
-            .class("search-box")
-            .class([
-                "w-full",
-                "mb-2",
-                "ml-0",
-                "xl:ml-48",
-                "p-2",
-                "inline-flex",
-                "transition-all",
-            ])
-            .visible_signal(catalogue.is_search.signal())
-            .children(&mut [
-                html!("input" => HtmlInputElement, {
-                    .class([
-                        "border",
-                        "rounded",
-                        "focus:outline-none",
-                        "w-full",
-                        "mr-2",
-                        "p-1"
-                    ])
-                    .attribute("placeholder", "Search")
-                    .attribute("type", "text")
-                    .property_signal("value", catalogue.keyword.signal_cloned())
-                    .with_node!(input => {
-                        .event(clone!(catalogue => move |_: events::Input| {
-                            catalogue.keyword.set_neq(input.value());
-                        }))
-                        .event_preventable(clone!(catalogue => move |event: events::KeyDown| {
-                            if event.key() == "Enter" {
-                                event.prevent_default();
+                            if catalogue.keyword.get_cloned().is_some() {
+                                catalogue.keyword.set_neq(None);
                                 catalogue.cover_list.lock_mut().clear();
                                 catalogue.page.set_neq(1);
                                 Self::fetch_mangas(catalogue.clone());
                             }
                         }))
-                    })
-                }),
-                html!("button", {
-                    .text("Cancel")
-                    .event(clone!(catalogue => move |_: events::Click| {
-                        catalogue.is_search.set_neq(false);
-                        if catalogue.keyword.get_cloned() != "" {
-                            catalogue.keyword.set_neq("".to_string());
-                            catalogue.cover_list.lock_mut().clear();
-                            catalogue.page.set_neq(1);
-                            Self::fetch_mangas(catalogue.clone());
-                        }
+                        .children(&mut [
+                            svg!("svg", {
+                                .attribute("xmlns", "http://www.w3.org/2000/svg")
+                                .attribute("fill", "none")
+                                .attribute("viewBox", "0 0 24 24")
+                                .attribute("stroke", "currentColor")
+                                .class("icon")
+                                .children(&mut [
+                                    svg!("path", {
+                                        .attribute("stroke-linecap", "round")
+                                        .attribute("stroke-linejoin", "round")
+                                        .attribute("stroke-width", "2")
+                                        .attribute("d", "M6 18L18 6M6 6l12 12")
+                                    })
+                                ])
+                            }),
+                        ])
                     }))
-                })
-            ])
+                } else {
+                    Some(html!("div", {
+                        .style("min-width", "5rem")
+                        .style("display", "flex")
+                        .style("justify-content", "flex-end")
+                        .children(&mut [
+                            html!("button", {
+                                .attribute("id", "search")
+                                .event(clone!(catalogue => move |_: events::Click| {
+                                    catalogue.is_search.set_neq(true);
+                                }))
+                                .children(&mut [
+                                    svg!("svg", {
+                                        .attribute("xmlns", "http://www.w3.org/2000/svg")
+                                        .attribute("fill", "none")
+                                        .attribute("viewBox", "0 0 24 24")
+                                        .attribute("stroke", "currentColor")
+                                        .class("icon")
+                                        .children(&mut [
+                                            svg!("path", {
+                                                .attribute("stroke-linecap", "round")
+                                                .attribute("stroke-linejoin", "round")
+                                                .attribute("stroke-width", "2")
+                                                .attribute("d", "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z")
+                                            })
+                                        ])
+                                    }),
+                                ])
+                            }),
+                            html!("button", {
+                                .attribute("id", "filter")
+                                .style("margin-left", "0.5rem")
+                                .event(clone!(catalogue => move |_: events::Click| {
+                                    if catalogue.input_list_modal.input_list.lock_ref().is_empty() {
+                                        Self::fetch_source_filters(catalogue.clone());
+                                    }
+                                    catalogue.input_list_modal.show();
+                                }))
+                                .children(&mut [
+                                    svg!("svg", {
+                                        .attribute("xmlns", "http://www.w3.org/2000/svg")
+                                        .attribute("fill", "none")
+                                        .attribute("viewBox", "0 0 24 24")
+                                        .attribute("stroke", "currentColor")
+                                        .class("icon")
+                                        .children(&mut [
+                                            svg!("path", {
+                                                .attribute("stroke-linecap", "round")
+                                                .attribute("stroke-linejoin", "round")
+                                                .attribute("stroke-width", "2")
+                                                .attribute("d", "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z")
+                                            })
+                                        ])
+                                    }),
+                                ])
+                            })
+                        ])
+                    }))
+                }
+            })))
         })
     }
 
@@ -330,154 +378,48 @@ impl Catalogue {
         })
     }
 
-    pub fn render_select(catalogue: Rc<Self>) -> Dom {
-        html!("ul", {
-            .class("list")
-            .children_signal_vec(catalogue.sources.signal_vec_cloned().map(|source| html!("li", {
-                .class("list-item")
-                .children(&mut [
-                    link!(Route::Catalogue{id: source.id, latest: false}.url(), {
-                        .class("source-item")
-                        .children(&mut [
-                            html!("img", {
-                                .class_signal("invisible", Mutable::new(source.icon.clone()).signal_cloned().map(|icon| icon.is_empty()))
-                                .attribute("src", &source.icon)
-                            }),
-                            html!("span", {
-                                .text(&source.name)
-                            }),
-                        ])
-                    }),
-                    link!(Route::Catalogue{id: source.id, latest: true}.url(), {
-                        .class("source-action")
-                        .text("latest")
-                    }),
-                ])
-            })))
-        })
-    }
-
-    pub fn render_global_search(catalogue: Rc<Self>) -> Dom {
-        html!("div", {
-            .children_signal_vec(catalogue.cover_list_map.entries_cloned().map(clone!(catalogue => move |(source_id, source_manga)| html!("div", {
-                .children(&mut [
-                    html!("div", {
-                        .style("display", "flex")
-                        .style("justify-content", "space-between")
-                        .style("margin", "0.25rem")
-                        .children(&mut [
-                            html!("span", {
-                                .text(&source_manga.name)
-                            }),
-                            html!("button", {
-                                .text("More")
-                                .event(clone!(catalogue, source_manga => move |_:events::Click| {
-                                    catalogue.cover_list.lock_mut().replace_cloned(source_manga.covers.clone());
-
-                                    let state =  catalogue.serialize_into_json();
-                                    local_storage().set("catalogue", state.as_str()).unwrap_throw();
-
-                                    routing::go_to_url(Route::Catalogue{id: source_id, latest: false}.url().as_str());
-                                }))
-                            }),
-                        ])
-                    }),
-                    html!("div", {
-                        .style("overflow-x", "scroll")
-                        .style("overflow-y", "hidden")
-                        .style("white-space", " nowrap")
-                        .style("border-radius", "0.375rem")
-                        .child_signal(catalogue.loader.is_loading().map(clone!(source_manga => move |is_loading| if is_loading && source_manga.covers.is_empty() {
-                            Some(Spinner::render_spinner(false))
-                        } else {
-                            None
-                        })))
-                        .children_signal_vec(signal_vec::always(source_manga.covers).map(|cover| link!(cover.link(), {
-                            .style("margin", "0.25rem")
-                            .style("position", "relative")
-                            .children(&mut [
-                                html!("img", {
-                                    .style("height", "12rem")
-                                    .style("border-radius", "0.375rem")
-                                    .attribute("src", &cover.cover_url)
-                                }),
-                                html!("div", {
-                                    .style("position", "absolute")
-                                    .style("bottom", "0px")
-                                    .style("left", "0px")
-                                    .style("font-size", "0.875rem")
-                                    .style("background-image", "linear-gradient(to top, #000000aa, transparent)")
-                                    .style("width", "100%")
-                                    .style("color", "#f7fafc")
-                                    .style("padding-bottom", "0.25rem")
-                                    .style("padding-top", "1.75rem")
-                                    .style("overflow", "hidden")
-                                    .style("text-overflow", "ellipsis")
-                                    .style("white-space", "nowrap")
-                                    .style("border-bottom-right-radius", "0.375rem")
-                                    .style("border-bottom-left-radius", "0.375rem")
-                                    .children(&mut [
-                                        html!("span", {
-                                            .style("margin", "0.125rem")
-                                            .text(&cover.title)
-                                        })
-                                    ])
-                                })
-                            ])
-                        })))
-                    })
-                ])
-            }))))
-        })
-    }
-
-    pub fn render(catalogue: Rc<Self>, source_id: i64, latest: bool) -> Dom {
-        if source_id > 0 && source_id != catalogue.source_id.get() {
-            catalogue.source_id.set(source_id);
-            let (sort_by, sort_order) = if latest {
-                (SortByParam::LAST_UPDATED, SortOrderParam::DESC)
-            } else {
-                (SortByParam::VIEWS, SortOrderParam::DESC)
-            };
-            catalogue.sort_by.set(sort_by);
-            catalogue.sort_order.set(sort_order);
-            Self::fetch_mangas(catalogue.clone());
-        } else if source_id == 0 && !catalogue.is_search.get() {
-            catalogue.reset();
-            Self::fetch_sources(catalogue.clone());
-        } else if source_id == 0 && catalogue.is_search.get() {
-            catalogue.source_id.set(source_id);
+    pub fn render(self: Rc<Self>, latest: bool, query: Option<String>) -> Dom {
+        if self.cover_list.lock_ref().is_empty() {
+            Self::fetch_mangas(self.clone());
         }
 
-        let s = map_ref! {
-            let source_id = catalogue.source_id.signal(),
-            let is_search = catalogue.is_search.signal() => 
+        // let s = map_ref! {
+        //     let keyword = self.keyword.signal_cloned(),
 
-            (*source_id, *is_search)
-        };
+        //     (keyword.clone())
+        // };
+
+        self.is_search.set_neq(query.is_some());
+        self.keyword.set_neq(query);
+        self.latest.set_neq(latest);
 
         html!("div", {
+            .future(self.keyword.signal_cloned().for_each({
+                let catalogue = self.clone();
+                move |_| {
+                    catalogue.replace_state_with_url();
+
+                    async {}
+                }
+            }))
             .children(&mut [
-                Self::render_topbar(catalogue.clone()),
+                Self::render_topbar(self.clone()),
                 html!("div", {
                     .class("topbar-spacing")
                 })
             ])
-            // .future(catalogue.source_id.signal().for_each(|source_id| {
-            //     if source_id > 0 {
-            //         Self::push_state_with_url(source_id);
-            //     }
-
-            //     async {}
-            // }))
-            .child_signal(s.map(clone!(catalogue => move |(source_id, is_search)| if source_id > 0 {
-                Some(Self::render_main(catalogue.clone()))
-            } else if is_search {
-                Some(Self::render_global_search(catalogue.clone()))
-            } else {
-                Some(Self::render_select(catalogue.clone()))
-            })))
             .children(&mut [
+                Self::render_main(self.clone()),
+                InputList::render(self.input_list_modal.clone(), {
+                    let catalogue = self.clone();
+                    move || {
+                        catalogue.cover_list.lock_mut().clear();
+                        catalogue.page.set(1);
+                        catalogue.keyword.set(None);
+                        catalogue.is_filter.set(true);
+                        Self::fetch_mangas(catalogue.clone());
+                    }
+                }),
                 html!("div", {
                     .class("bottombar-spacing")
                 })
