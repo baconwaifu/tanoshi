@@ -12,7 +12,8 @@ use axum::{
 use headers::{authorization::Bearer, Authorization};
 use jsonwebtoken::{DecodingKey, Validation};
 use std::{
-    net::{SocketAddr},
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
 };
 use tower_http::cors::{Any, CorsLayer};
 
@@ -110,7 +111,7 @@ pub async fn serve(
     port: u16,
     router: Router<axum::body::Body>,
 ) -> Result<(), anyhow::Error> {
-    let addr = SocketAddr::from((config.bind_ip, config.port));
+    let addr = SocketAddr::from((IpAddr::from_str(addr)?, port));
     Server::bind(&addr)
         .serve(router.into_make_service())
         .await?;

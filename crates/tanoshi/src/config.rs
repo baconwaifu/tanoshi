@@ -75,12 +75,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             path: tanoshi_home().join("config.yml"),
-<<<<<<< HEAD
             bind_ip: default_bind_ip(),
-=======
             extension_repository: default_extension_repository(),
             base_url: None,
->>>>>>> 5e73fbe712e49e0771bb8be729cb7b337fa56f21
             port: default_port(),
             database_path: default_database_path(),
             secret: default_secret(),
